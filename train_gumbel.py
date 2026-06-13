@@ -317,9 +317,6 @@ def kl_and_entropy(q_logits, p_logits):
     ent_global = -(q_global * (q_global + 1e-9).log()).sum(-1).mean()
     
     return kl, ent_local, ent_global
-    ent = ent_per_token.mean()
-    
-    return kl, ent
 
 def student_loss(t_z, s_z, s_all, s_ids, s_ym, beta):
     """L_s = CE(y) + β·KL"""
@@ -583,8 +580,8 @@ def train():
                 s_at_no_q[s_qm] = 0  # маскируем Q в attention
                 
                 # ДЛЯ ПАРАНОИ: Физически зануляем эмбеддинги Q, чтобы исключить любые утечки
-                s_inputs_embeds_no_q = s_inputs_embeds.clone()
-                s_inputs_embeds_no_q[s_qm] = 0.0
+                q_mask_expanded = s_qm.unsqueeze(-1).expand_as(s_inputs_embeds)
+                s_inputs_embeds_no_q = s_inputs_embeds * (~q_mask_expanded).float()
 
                 s_out_no_q = student(inputs_embeds=s_inputs_embeds_no_q, attention_mask=s_at_no_q)
                 ce_z_only = ce_on_mask(s_out_no_q.logits, s_ids, s_ym)
