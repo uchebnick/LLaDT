@@ -54,7 +54,8 @@ class Config:
     
     # Энтропия
     ent_coef: float        = 0.5          # Коэффициент энтропии (ШТРАФ за высокую локальную энтропию)
-    global_ent_coef: float = 0.5          # Бонус за глобальное разнообразие словаря (InfoMax)
+    global_ent_coef: float = 0.5          # Бонус за глобальное разнообразие словаря (по всему батчу)
+    seq_ent_coef: float    = 0.5          # Бонус за разнообразие словаря внутри ОДНОГО z (штраф за 4444...)
     
     # Штраф за энтропию не нужен в Gumbel-Softmax, потому что токены всегда дискретные (hard=True)
     tau_start: float       = 2.0
@@ -312,28 +313,33 @@ def kl_and_entropy(q_logits, p_logits):
     ent_per_token = -(q * q_log.clamp(min=-100)).sum(-1)
     ent_local = ent_per_token.mean()
     
-    # Глобальная энтропия H_global (InfoMax)
-    q_global = q.mean(dim=1) # (B, V) усредняем вероятности по длине
-    ent_global = -(q_global * (q_global + 1e-9).log()).sum(-1).mean()
+    # Энтропия последовательности H_seq (разнообразие словаря внутри одного z)
+    q_seq = q.mean(dim=1) # (B, V) усредняем вероятности по длине
+    ent_seq = -(q_seq * (q_seq + 1e-9).log()).sum(-1).mean()
     
-    return kl, ent_local, ent_global
+    # Глобальная энтропия H_global (InfoMax)
+    q_global = q_seq.mean(dim=0) # (V,) усредняем по батчу
+    ent_global = -(q_global * (q_global + 1e-9).log()).sum()
+    
+    return kl, ent_local, ent_global, ent_seq
 
 def student_loss(t_z, s_z, s_all, s_ids, s_ym, beta):
     """L_s = CE(y) + β·KL"""
     ce  = ce_on_mask(s_all, s_ids, s_ym)
-    kl, _, _ = kl_and_entropy(t_z.detach(), s_z)
+    kl, _, _, _ = kl_and_entropy(t_z.detach(), s_z)
     return ce + beta * kl, ce.item(), kl.item()
 
-def teacher_loss_fn(t_all, t_z, s_z, t_ids, t_ym, beta, ent_coef, global_ent_coef):
-    """L_t = CE(y) + β·KL + ent_coef·H_local - global_ent_coef·H_global"""
+def teacher_loss_fn(t_all, t_z, s_z, t_ids, t_ym, beta, ent_coef, global_ent_coef, seq_ent_coef):
+    """L_t = CE(y) + β·KL + ent_coef·H_local - global_ent_coef·H_global - seq_ent_coef·H_seq"""
     ce       = ce_on_mask(t_all, t_ids, t_ym)
-    kl, ent_local, ent_global  = kl_and_entropy(t_z, s_z.detach())
+    kl, ent_local, ent_global, ent_seq  = kl_and_entropy(t_z, s_z.detach())
     
     # ПРИБАВЛЯЕМ локальную энтропию (ШТРАФ за неуверенность)
     # ВЫЧИТАЕМ глобальную энтропию (БОНУС за богатство словаря)
-    total_loss = ce + beta * kl + ent_coef * ent_local - global_ent_coef * ent_global
+    # ВЫЧИТАЕМ секвенциальную энтропию (БОНУС за богатство словаря внутри одной последовательности)
+    total_loss = ce + beta * kl + ent_coef * ent_local - global_ent_coef * ent_global - seq_ent_coef * ent_seq
     
-    return total_loss, ce.item(), kl.item(), ent_local.item(), ent_global.item()
+    return total_loss, ce.item(), kl.item(), ent_local.item(), ent_global.item(), ent_seq.item()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -353,17 +359,18 @@ class Logger:
         elif not hasattr(self, 'last_logged_ent'):
             self.last_logged_ent = 0.0
             
-        self.s = dict(loss=0., s_ce=0., s_kl=0., t_ce=0., t_kl=0., t_ent=0., t_ent_g=0., mi_ce=0.)
+        self.s = dict(loss=0., s_ce=0., s_kl=0., t_ce=0., t_kl=0., t_ent=0., t_ent_g=0., t_ent_seq=0., mi_ce=0.)
         self._n = 0
 
-    def update(self, loss, s_ce, s_kl, t_ce, t_kl, t_ent, t_ent_g, mi_ce, step_t):
+    def update(self, loss, s_ce, s_kl, t_ce, t_kl, ent_local, ent_global, ent_seq, mi_ce, step_t):
         self.s["loss"]  += loss
         self.s["s_ce"]  += s_ce
         self.s["s_kl"]  += s_kl
         self.s["t_ce"]  += t_ce
         self.s["t_kl"]  += t_kl
-        self.s["t_ent"] += t_ent
-        self.s["t_ent_g"] += t_ent_g
+        self.s["t_ent"] += ent_local
+        self.s["t_ent_g"] += ent_global
+        self.s["t_ent_seq"] += ent_seq
         self.s["mi_ce"] += mi_ce
         self._n         += 1
         self._step_times.append(step_t)
@@ -382,7 +389,7 @@ class Logger:
             f"  loss={self.s['loss']/n:.3f}"
             f"  s_ce={self.s['s_ce']/n:.3f}  s_kl={self.s['s_kl']/n:.3f}"
             f"  t_ce={self.s['t_ce']/n:.3f}  t_kl={self.s['t_kl']/n:.3f}"
-            f"  H_L={self.s['t_ent']/n:.3f}  H_G={self.s['t_ent_g']/n:.3f}  mi={self.s['mi_ce']/n:.2f}"
+            f"  H_L={self.s['t_ent']/n:.3f}  H_G={self.s['t_ent_g']/n:.3f}  H_S={self.s['t_ent_seq']/n:.3f}  mi={self.s['mi_ce']/n:.2f}"
             f"  β={beta:.2f}  lr={lr:.1e}"
             f"  {avg_t:.2f}s/it  ⏱{fmt_time(elapsed)}  ETA={fmt_time(eta)}"
             f"  VRAM=[{mem_t:.1f}|{mem_s:.1f}]G",
@@ -606,6 +613,14 @@ def train():
                 # Создаем суррогатный лосс для единого backward (решает проблему крэша DDP)
                 surrogate_loss = (soft_z_embeds * grad_z.detach()).sum()
 
+                # Если Учитель читерит, Студент не должен запоминать этот шифр!
+                # Умножаем лосс Студента на 1e-4, чтобы заморозить веса, но сохранить граф для DDP.
+                mi_value = ce_z_only.item()
+                if mi_value < cfg.mi_target:
+                    sl_weight = 1e-4
+                else:
+                    sl_weight = 1.0
+
                 # ── 5. Loss ──
                 t_z_on_s = CrossDeviceCopy.apply(t_z_log, cfg.student_device)
                 s_z_on_t = CrossDeviceCopy.apply(s_z_log, cfg.teacher_device)
@@ -613,14 +628,14 @@ def train():
                 sl, s_ce, s_kl = student_loss(
                     t_z_on_s, s_z_log, s_logits, s_ids, s_ym, beta)
 
-                tl, t_ce, t_kl, t_ent, t_ent_g = teacher_loss_fn(
+                tl, t_ce, t_kl, t_ent, t_ent_g, t_ent_seq = teacher_loss_fn(
                     t_logits, t_z_log, s_z_on_t.detach(),
-                    t_ids, t_ym, beta, cfg.ent_coef, cfg.global_ent_coef)
+                    t_ids, t_ym, beta, cfg.ent_coef, cfg.global_ent_coef, cfg.seq_ent_coef)
 
                 # ── 6. Оптимизация: совместный backward для экономии памяти ──
-                total_loss = sl + tl.to(sl.device) + surrogate_loss.to(sl.device)
+                total_loss = sl_weight * sl + tl.to(sl.device) + surrogate_loss.to(sl.device)
                 accelerator.backward(total_loss)
-                logger.update(sl.item(), s_ce, s_kl, t_ce, t_kl, t_ent, t_ent_g, ce_z_only.item(),
+                logger.update(sl.item(), s_ce, s_kl, t_ce, t_kl, t_ent, t_ent_g, t_ent_seq, ce_z_only.item(),
                               time.time() - t0)
 
                 # ── 6. Optimizer step ──
