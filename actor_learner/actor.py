@@ -13,14 +13,29 @@ class MathQADataset(Dataset):
         raw = load_dataset(cfg.dataset_name, split="train")
         if max_samples:
             raw = raw.select(range(min(max_samples, len(raw))))
-        self.samples = []
+        
+        # Фильтруем пустые
+        valid_items = []
+        questions = []
         for item in raw:
             q = item.get("problem", "").strip()
             a = self._extract(item)
             if q and a:
-                q_len = len(tokenizer(f"Q: {q}\n", add_special_tokens=False)["input_ids"])
+                valid_items.append({"q": q, "a": a})
+                questions.append(f"Q: {q}\n")
+        
+        # Токенизируем батчем (в разы быстрее, спасает от таймаута Learner)
+        if questions:
+            tokenized = tokenizer(questions, add_special_tokens=False)
+            lengths = [len(ids) for ids in tokenized["input_ids"]]
+            
+            self.samples = []
+            for item, q_len in zip(valid_items, lengths):
                 if q_len <= cfg.max_q_tokens:
-                    self.samples.append({"q": q, "a": a})
+                    self.samples.append(item)
+        else:
+            self.samples = []
+            
         print(f"[Actor] Dataset loaded: {len(self.samples):,} examples")
 
     @staticmethod
