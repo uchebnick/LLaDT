@@ -270,11 +270,11 @@ def run_learner(rank, data_queue, sync_queue):
         z_list = []
         while len(batch) < cfg.learner_batch_size:
             try:
-                item, z = data_queue.get(timeout=60.0)
+                item, z = data_queue.get(timeout=300.0)
                 batch.append(item)
                 z_list.append(z)
             except queue.Empty:
-                print("[Learner] Queue empty for 60s. Actor might have crashed. Exiting.")
+                print("[Learner] Queue empty for 300s. Actor might have crashed. Exiting.")
                 import sys; sys.exit(1)
             
         (t_ids, t_at, t_zm_log, t_ym),         (s_ids, s_at, s_zm_log, s_zm_embed, s_ym, s_qm) = build_sequences(batch, tokenizer, z_list, cfg.learner_device)
