@@ -175,15 +175,12 @@ def build_sequences(batch, tokenizer, z_list, device):
 def build_student_inputs_embeds(model, s_ids, s_zm_embed, s_qm, soft_z, device):
     embed_matrix = model.get_input_embeddings().weight
     s_ids = s_ids.to(device)
-    s_embeds = embed_matrix[s_ids].clone() # [B, L, D], clone to allow inplace modification
+    s_embeds = embed_matrix[s_ids].clone() # [B, L, D]
     
-    # Заменяем токены z на soft_z и обнуляем вопрос Q для 3-го прохода (Anti-Shortcut)
+    # Заменяем токены z на soft_z
     for i in range(len(s_ids)):
         z_idx = s_zm_embed[i].nonzero(as_tuple=True)[0]
         s_embeds[i, z_idx] = soft_z[i, :len(z_idx)]
-        
-        q_idx = s_qm[i].nonzero(as_tuple=True)[0]
-        s_embeds[i, q_idx] = 0.0
         
     return s_embeds
 
