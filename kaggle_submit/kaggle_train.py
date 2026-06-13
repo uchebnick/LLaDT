@@ -171,7 +171,6 @@ def run_actor(rank, data_queue, sync_queue):
             # Кладем сэмплы в очередь по одному или батчами
             # Чтобы Learner мог брать их маленькими порциями (learner_batch_size)
             # мы разобьем сгенерированный батч на отдельные сэмплы
-            import queue
             for i in range(B):
                 item = {"q": batch["q"][i] if isinstance(batch, dict) else batch[i]["q"], 
                         "a": batch["a"][i] if isinstance(batch, dict) else batch[i]["a"]}
@@ -196,6 +195,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model
 
+import queue
 
 # =============================================================================
 # Утилиты логирования и метрик
@@ -446,7 +446,6 @@ def run_learner(rank, data_queue, sync_queue):
         
         batch = []
         z_list = []
-        import queue
         while len(batch) < cfg.learner_batch_size:
             try:
                 item, z = data_queue.get(timeout=60.0)

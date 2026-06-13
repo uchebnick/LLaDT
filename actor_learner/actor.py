@@ -103,7 +103,6 @@ def run_actor(rank, data_queue, sync_queue):
             # Кладем сэмплы в очередь по одному или батчами
             # Чтобы Learner мог брать их маленькими порциями (learner_batch_size)
             # мы разобьем сгенерированный батч на отдельные сэмплы
-            import queue
             for i in range(B):
                 item = {"q": batch["q"][i] if isinstance(batch, dict) else batch[i]["q"], 
                         "a": batch["a"][i] if isinstance(batch, dict) else batch[i]["a"]}

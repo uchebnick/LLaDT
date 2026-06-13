@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model
 from config import cfg
+import queue
 
 # =============================================================================
 # Утилиты логирования и метрик
@@ -256,7 +257,6 @@ def run_learner(rank, data_queue, sync_queue):
         
         batch = []
         z_list = []
-        import queue
         while len(batch) < cfg.learner_batch_size:
             try:
                 item, z = data_queue.get(timeout=60.0)
