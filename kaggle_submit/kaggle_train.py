@@ -538,10 +538,13 @@ def run_learner(rank, data_queue, sync_queue):
             # Синхронизация весов (передаем одну модель)
             if (step // cfg.grad_accum) % cfg.sync_every_n_steps == 0:
                 sd = {k: v.cpu() for k, v in model.state_dict().items() if "lora" in k}
-                if sync_queue.full():
+                while True:
                     try: sync_queue.get_nowait()
-                    except: pass
-                sync_queue.put(sd)
+                    except queue.Empty: break
+                try:
+                    sync_queue.put_nowait(sd)
+                except queue.Full:
+                    pass
 
         # Логирование
         if step % cfg.log_every == 0 and step > 0:
