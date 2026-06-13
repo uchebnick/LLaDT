@@ -23,8 +23,8 @@ class Config:
 
     # Обучение
     actor_batch_size: int  = 16           # Огромный батч для генерации
-    learner_batch_size: int = 8           # Увеличиваем батч в 2 раза (VRAM позволяет)
-    grad_accum: int        = 4            # Эффективный батч = 32
+    learner_batch_size: int = 4           # Уменьшаем батч, чтобы избежать OOM при длинных последовательностях (512 токенов)
+    grad_accum: int        = 8            # Эффективный батч = 32 (4 * 8)
     lr: float              = 3e-4
     max_steps: int         = 1000
     warmup_steps: int      = 100
