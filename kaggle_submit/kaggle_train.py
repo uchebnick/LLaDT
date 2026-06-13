@@ -74,6 +74,7 @@ from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader, Dataset
 from datasets import load_dataset
 import re
+import queue
 
 class MathQADataset(Dataset):
     def __init__(self, tokenizer, max_samples=None):
@@ -110,7 +111,7 @@ def run_actor(rank, data_queue, sync_queue):
         attn_implementation="sdpa")
     
     peft_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
+        task_type="CAUSAL_LM",
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
         lora_dropout=cfg.lora_dropout,
@@ -397,8 +398,8 @@ def kl_balanced(q_logits, p_logits):
     p_log = F.log_softmax(p_logits.float(), dim=-1)
     
     # Спортивный KL, где градиенты текут в обе стороны (симметричный)
-    kl_qp = F.kl_div(p_log, q_log.exp(), reduction='none', log_target=False).sum(-1).mean()
-    kl_pq = F.kl_div(q_log, p_log.exp(), reduction='none', log_target=False).sum(-1).mean()
+    kl_qp = F.kl_div(p_log, q_log, reduction='none', log_target=True).sum(-1).mean()
+    kl_pq = F.kl_div(q_log, p_log, reduction='none', log_target=True).sum(-1).mean()
     
     kl = 0.5 * (kl_qp + kl_pq)
     
@@ -460,10 +461,12 @@ def run_learner(rank, data_queue, sync_queue):
         # 1. q(z|Q,A) - Учитель (видит Q+A)
         q_out = model(input_ids=t_ids, attention_mask=t_at)
         q_z_log = masked_logits(q_out.logits, t_zm_log, cfg.latent_len)
+        del q_out
         
         # 2. p(z|Q) - Ученик (видит только Q)
         p_out = model(input_ids=s_ids, attention_mask=s_at)
         p_z_log = masked_logits(p_out.logits, s_zm_log, cfg.latent_len)
+        del p_out
         
         # 3. KL Divergence (symmetric)
         kl, entropy = kl_balanced(q_z_log, p_z_log)
@@ -477,16 +480,27 @@ def run_learner(rank, data_queue, sync_queue):
             model, s_ids, s_zm_embed, soft_z_embeds, cfg.learner_device
         )
         a_out = model(inputs_embeds=s_inputs_embeds, attention_mask=s_at)
+        a_logits = a_out.logits
+        del a_out
         
-        ce = ce_on_mask(a_out.logits, s_ids, s_ym)
+        ce = ce_on_mask(a_logits, s_ids, s_ym)
         
         total_loss = (ce + beta * kl) / cfg.grad_accum
+        
+        ce_val = ce.item()
+        kl_val = kl.item()
+        ent_val = entropy.item()
+        loss_val = total_loss.item() * cfg.grad_accum
+        
+        # Освобождаем память до backward
+        del ce, kl, entropy, q_z_log, p_z_log, q_z_probs, soft_z_embeds, s_inputs_embeds
+        
         total_loss.backward()
         
         logger.update(
-            total_loss.item() * cfg.grad_accum,
-            ce.item(), kl.item(),
-            entropy.item(),
+            loss_val,
+            ce_val, kl_val,
+            ent_val,
             time.time() - t0
         )
         
@@ -511,7 +525,7 @@ def run_learner(rank, data_queue, sync_queue):
             logger.log_step(step, samples_processed, beta, lr, mem_l)
             
         if step % cfg.sample_every == 0:
-            logger.log_sample(step, batch, z_list, a_out.logits, s_ym, tokenizer, beta)
+            logger.log_sample(step, batch, z_list, a_logits.detach(), s_ym, tokenizer, beta)
 
     print("[Learner] Training finished.")
 

@@ -6,6 +6,7 @@ from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader, Dataset
 from datasets import load_dataset
 import re
+import queue
 
 class MathQADataset(Dataset):
     def __init__(self, tokenizer, max_samples=None):
@@ -42,7 +43,7 @@ def run_actor(rank, data_queue, sync_queue):
         attn_implementation="sdpa")
     
     peft_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
+        task_type="CAUSAL_LM",
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
         lora_dropout=cfg.lora_dropout,
