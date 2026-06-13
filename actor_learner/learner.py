@@ -42,15 +42,16 @@ class Logger:
         self._step_times = []
 
     def reset(self):
-        self.s = dict(loss=0., s_ce=0., s_kl=0., t_ce=0., t_kl=0.)
+        self.s = {"loss": 0, "s_ce": 0, "s_kl": 0, "t_ce": 0, "t_kl": 0, "ent": 0}
         self._n = 0
 
-    def update(self, loss, s_ce, s_kl, t_ce, t_kl, step_t):
-        self.s["loss"]  += loss
-        self.s["s_ce"]  += s_ce
-        self.s["s_kl"]  += s_kl
-        self.s["t_ce"]  += t_ce
-        self.s["t_kl"]  += t_kl
+    def update(self, loss, s_ce, s_kl, t_ce, t_kl, ent, step_t):
+        self.s["loss"] += loss
+        self.s["s_ce"] += s_ce
+        self.s["s_kl"] += s_kl
+        self.s["t_ce"] += t_ce
+        self.s["t_kl"] += t_kl
+        self.s["ent"]  += ent
         self._n         += 1
         self._step_times.append(step_t)
 
@@ -68,6 +69,7 @@ class Logger:
             f"  loss={self.s['loss']/n:.3f}"
             f"  s_ce={self.s['s_ce']/n:.3f}  s_kl={self.s['s_kl']/n:.3f}"
             f"  t_ce={self.s['t_ce']/n:.3f}  t_kl={self.s['t_kl']/n:.3f}"
+            f"  ent={self.s['ent']/n:.3f}"
             f"  β={beta:.2f}  lr={lr:.1e}"
             f"  {avg_t:.2f}s/it  ⏱{fmt_time(elapsed)}  ETA={fmt_time(eta)}"
             f"  VRAM=[{mem_l:.1f}]G",
@@ -207,9 +209,14 @@ def ce_on_mask(logits, ids, mask):
 def kl_balanced(q_logits, p_logits):
     q_log = F.log_softmax(q_logits.float(), dim=-1)
     p_log = F.log_softmax(p_logits.float(), dim=-1)
-    kl_student = F.kl_div(p_log, q_log.detach(), reduction='none', log_target=True).sum(-1).mean()
+    kl_student = F.kl_div(q_log.detach(), p_log, reduction='none', log_target=True).sum(-1).mean()
     kl_teacher = F.kl_div(q_log, p_log.detach(), reduction='none', log_target=True).sum(-1).mean()
-    return kl_student, kl_teacher
+    
+    # Entropy of teacher: H(q) = -sum(q * log(q))
+    q_prob = q_log.exp()
+    entropy = -(q_prob * q_log).sum(dim=-1).mean()
+    
+    return kl_student, kl_teacher, entropy
 
 # =============================================================================
 # Основной процесс
@@ -244,8 +251,6 @@ def run_learner(rank, data_queue, sync_queue):
     student.gradient_checkpointing_enable()
     student.train(); student.config.use_cache = False
 
-    # Используем AdamW от PyTorch напрямую (без bitsandbytes для совместимости mp) 
-    # или можно оставить bnb
     import bitsandbytes as bnb
     opt_t = bnb.optim.PagedAdamW8bit(teacher.parameters(), lr=cfg.lr, weight_decay=0.01)
     opt_s = bnb.optim.PagedAdamW8bit(student.parameters(), lr=cfg.lr, weight_decay=0.01)
@@ -257,11 +262,9 @@ def run_learner(rank, data_queue, sync_queue):
         beta = get_beta(step)
         tau = get_tau(step)
         
-        # 1. Извлекаем батч из очереди (по размеру learner_batch_size)
         batch = []
         z_list = []
         import queue
-        # Блокируемся, пока не наберем батч, с таймаутом чтобы избежать дедлока
         while len(batch) < cfg.learner_batch_size:
             try:
                 item, z = data_queue.get(timeout=60.0)
@@ -271,12 +274,8 @@ def run_learner(rank, data_queue, sync_queue):
                 print("[Learner] Queue empty for 60s. Actor might have crashed. Exiting.")
                 import sys; sys.exit(1)
             
-        # 2. Строим последовательности
         (t_ids, t_at, t_zm_log, t_ym), \
         (s_ids, s_at, s_zm_log, s_zm_embed, s_ym, s_qm) = build_sequences(batch, tokenizer, z_list, cfg.learner_device)
-        
-        # 3. Градиентные накопления (цикл внутри батча, если мы хотим имитировать grad_accum)
-        # В нашем случае мы просто пропускаем loss через backward() и делаем step() реже
         
         t_out = teacher(input_ids=t_ids, attention_mask=t_at)
         t_logits = t_out.logits
@@ -284,7 +283,6 @@ def run_learner(rank, data_queue, sync_queue):
         
         s_embed_matrix = student.get_input_embeddings().weight
         t_z_probs = F.gumbel_softmax(t_z_log.float(), tau=tau, hard=True, dim=-1).to(s_embed_matrix.dtype)
-        # Поскольку обе модели на learner_device, обойдемся без CrossDeviceCopy
         soft_z_embeds = torch.matmul(t_z_probs, s_embed_matrix.detach())
         
         s_inputs_embeds = build_student_inputs_embeds(
@@ -297,18 +295,22 @@ def run_learner(rank, data_queue, sync_queue):
         s_ce = ce_on_mask(s_logits, s_ids, s_ym)
         t_ce = ce_on_mask(t_logits, t_ids, t_ym)
         
-        kl_student, kl_teacher = kl_balanced(t_z_log, s_z_log)
+        kl_student, kl_teacher, entropy = kl_balanced(t_z_log, s_z_log)
         
         sl = s_ce + (cfg.kl_balance_alpha * beta) * kl_student
         tl = t_ce + beta * kl_teacher
         
-        # Делим лосс для grad_accum
         total_loss = (sl + tl) / cfg.grad_accum
         total_loss.backward()
         
-        logger.update(sl.item(), s_ce.item(), kl_student.item(), t_ce.item(), kl_teacher.item(), time.time() - t0)
+        logger.update(
+            total_loss.item() * cfg.grad_accum,
+            s_ce.item(), kl_student.item(),
+            t_ce.item(), kl_teacher.item(),
+            entropy.item(),
+            time.time() - t0
+        )
         
-        # Делаем step только если накопили нужное количество градиентов
         if (step + 1) % cfg.grad_accum == 0:
             lr = get_lr(step)
             for opt in [opt_t, opt_s]:
