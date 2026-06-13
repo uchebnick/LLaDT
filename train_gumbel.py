@@ -307,7 +307,9 @@ def kl_and_entropy(q_logits, p_logits):
     
     # Локальная энтропия H_local(q) для каждого токена: (B, L)
     q = q_log.exp()
-    ent_per_token = -(q * q_log).sum(-1)
+    # Защита от NaN: когда q -> 0, q_log -> -inf, и 0 * -inf даёт NaN.
+    # Поэтому мы ограничиваем q_log снизу (например, -100).
+    ent_per_token = -(q * q_log.clamp(min=-100)).sum(-1)
     ent_local = ent_per_token.mean()
     
     # Глобальная энтропия H_global (InfoMax)
