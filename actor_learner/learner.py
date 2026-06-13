@@ -201,8 +201,8 @@ def ce_on_mask(logits, ids, mask):
         return torch.tensor(0.0, device=logits.device, requires_grad=True)
     valid_logits = logits_shift.reshape(-1, V)[valid_idx]
     valid_targets = targets.reshape(-1)[valid_idx]
-    sum_ce = F.cross_entropy(valid_logits.float(), valid_targets, reduction="sum")
-    return sum_ce / B
+    mean_ce = F.cross_entropy(valid_logits.float(), valid_targets, reduction="mean")
+    return mean_ce
 
 def kl_balanced(q_logits, p_logits):
     q_log = F.log_softmax(q_logits.float(), dim=-1)
@@ -260,11 +260,16 @@ def run_learner(rank, data_queue, sync_queue):
         # 1. Извлекаем батч из очереди (по размеру learner_batch_size)
         batch = []
         z_list = []
-        # Блокируемся, пока не наберем батч
+        import queue
+        # Блокируемся, пока не наберем батч, с таймаутом чтобы избежать дедлока
         while len(batch) < cfg.learner_batch_size:
-            item, z = data_queue.get()
-            batch.append(item)
-            z_list.append(z)
+            try:
+                item, z = data_queue.get(timeout=60.0)
+                batch.append(item)
+                z_list.append(z)
+            except queue.Empty:
+                print("[Learner] Queue empty for 60s. Actor might have crashed. Exiting.")
+                import sys; sys.exit(1)
             
         # 2. Строим последовательности
         (t_ids, t_at, t_zm_log, t_ym), \

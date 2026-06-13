@@ -102,11 +102,16 @@ def run_actor(rank, data_queue, sync_queue):
             # Кладем сэмплы в очередь по одному или батчами
             # Чтобы Learner мог брать их маленькими порциями (learner_batch_size)
             # мы разобьем сгенерированный батч на отдельные сэмплы
+            import queue
             for i in range(B):
                 item = {"q": batch["q"][i] if isinstance(batch, dict) else batch[i]["q"], 
                         "a": batch["a"][i] if isinstance(batch, dict) else batch[i]["a"]}
-                # Если очередь переполнена, put() заблокирует выполнение до освобождения места
-                data_queue.put((item, z_list[i]))
+                while True:
+                    try:
+                        data_queue.put((item, z_list[i]), timeout=60.0)
+                        break
+                    except queue.Full:
+                        pass # Ждем пока Learner заберет данные
                 
             t1 = time.time()
             if step % 5 == 0:

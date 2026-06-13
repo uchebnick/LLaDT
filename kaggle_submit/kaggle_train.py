@@ -21,9 +21,9 @@ class Config:
     tau_anneal_steps: int  = 400
 
     # Обучение
-    actor_batch_size: int  = 8            # Огромный батч для генерации (ведь там только Учитель!)
-    learner_batch_size: int = 2           # Маленький батч для Forward/Backward
-    grad_accum: int        = 8
+    actor_batch_size: int  = 16           # Огромный батч для генерации (ведь там только Учитель!)
+    learner_batch_size: int = 8           # Увеличиваем батч для Forward/Backward (было 2)
+    grad_accum: int        = 4            # Уменьшаем, чтобы сохранить эффективный батч 32 (8*4=32)
     lr: float              = 1e-4
     max_steps: int         = 1000
     warmup_steps: int      = 100
@@ -171,11 +171,16 @@ def run_actor(rank, data_queue, sync_queue):
             # Кладем сэмплы в очередь по одному или батчами
             # Чтобы Learner мог брать их маленькими порциями (learner_batch_size)
             # мы разобьем сгенерированный батч на отдельные сэмплы
+            import queue
             for i in range(B):
                 item = {"q": batch["q"][i] if isinstance(batch, dict) else batch[i]["q"], 
                         "a": batch["a"][i] if isinstance(batch, dict) else batch[i]["a"]}
-                # Если очередь переполнена, put() заблокирует выполнение до освобождения места
-                data_queue.put((item, z_list[i]))
+                while True:
+                    try:
+                        data_queue.put((item, z_list[i]), timeout=60.0)
+                        break
+                    except queue.Full:
+                        pass # Ждем пока Learner заберет данные
                 
             t1 = time.time()
             if step % 5 == 0:
@@ -386,8 +391,8 @@ def ce_on_mask(logits, ids, mask):
         return torch.tensor(0.0, device=logits.device, requires_grad=True)
     valid_logits = logits_shift.reshape(-1, V)[valid_idx]
     valid_targets = targets.reshape(-1)[valid_idx]
-    sum_ce = F.cross_entropy(valid_logits.float(), valid_targets, reduction="sum")
-    return sum_ce / B
+    mean_ce = F.cross_entropy(valid_logits.float(), valid_targets, reduction="mean")
+    return mean_ce
 
 def kl_balanced(q_logits, p_logits):
     q_log = F.log_softmax(q_logits.float(), dim=-1)
@@ -445,11 +450,16 @@ def run_learner(rank, data_queue, sync_queue):
         # 1. Извлекаем батч из очереди (по размеру learner_batch_size)
         batch = []
         z_list = []
-        # Блокируемся, пока не наберем батч
+        import queue
+        # Блокируемся, пока не наберем батч, с таймаутом чтобы избежать дедлока
         while len(batch) < cfg.learner_batch_size:
-            item, z = data_queue.get()
-            batch.append(item)
-            z_list.append(z)
+            try:
+                item, z = data_queue.get(timeout=60.0)
+                batch.append(item)
+                z_list.append(z)
+            except queue.Empty:
+                print("[Learner] Queue empty for 60s. Actor might have crashed. Exiting.")
+                import sys; sys.exit(1)
             
         # 2. Строим последовательности
         (t_ids, t_at, t_zm_log, t_ym), \
