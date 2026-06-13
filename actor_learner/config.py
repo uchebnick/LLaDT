@@ -12,7 +12,7 @@ class Config:
     latent_len: int        = 64
 
     # ELBO / KL Balancing
-    beta: float            = 1.0          # KL divergence loss coefficient
+    beta: float            = 5.0          # Огромный штраф, чтобы Учитель боялся шифров
     kl_balance_alpha: float = 0.15        # Доля градиента для Студента (Учитель получает 1.0)
     
     # Gumbel-Softmax
