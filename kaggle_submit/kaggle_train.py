@@ -232,16 +232,17 @@ class Logger:
         self._step_times = []
 
     def reset(self):
-        self.s = {"loss": 0, "s_ce": 0, "s_kl": 0, "t_ce": 0, "t_kl": 0, "ent": 0}
+        self.s = {"loss": 0, "s_ce": 0, "s_kl": 0, "t_ce": 0, "t_kl": 0, "ent": 0, "kl_frz": 0}
         self._n = 0
 
-    def update(self, loss, s_ce, s_kl, t_ce, t_kl, ent, step_t):
+    def update(self, loss, s_ce, s_kl, t_ce, t_kl, ent, kl_frz, step_t):
         self.s["loss"] += loss
         self.s["s_ce"] += s_ce
         self.s["s_kl"] += s_kl
         self.s["t_ce"] += t_ce
         self.s["t_kl"] += t_kl
         self.s["ent"]  += ent
+        self.s["kl_frz"] += kl_frz
         self._n         += 1
         self._step_times.append(step_t)
 
@@ -259,7 +260,7 @@ class Logger:
             f"  loss={self.s['loss']/n:.3f}"
             f"  s_ce={self.s['s_ce']/n:.3f}  s_kl={self.s['s_kl']/n:.3f}"
             f"  t_ce={self.s['t_ce']/n:.3f}  t_kl={self.s['t_kl']/n:.3f}"
-            f"  ent={self.s['ent']/n:.3f}"
+            f"  ent={self.s['ent']/n:.3f}  kl_frz={self.s['kl_frz']/n:.3f}"
             f"  β={beta:.2f}  lr={lr:.1e}"
             f"  {avg_t:.2f}s/it  ⏱{fmt_time(elapsed)}  ETA={fmt_time(eta)}"
             f"  VRAM=[{mem_l:.1f}]G",
@@ -471,6 +472,22 @@ def run_learner(rank, data_queue, sync_queue):
         t_logits = t_out.logits
         t_z_log = masked_logits(t_logits, t_zm_log, cfg.latent_len)
         
+        # === СЕКРЕТНОЕ ОРУЖИЕ ПРОТИВ ШИФРОВ ===
+        # Получаем логиты от замороженной базовой модели (без LoRA)
+        with teacher.disable_adapter():
+            with torch.no_grad():
+                frozen_out = teacher(input_ids=t_ids, attention_mask=t_at)
+                frozen_logits = frozen_out.logits
+                frozen_z_log = masked_logits(frozen_logits, t_zm_log, cfg.latent_len)
+                
+        # Штрафуем Учителя за отклонение от базового английского языка
+        kl_frozen = F.kl_div(
+            F.log_softmax(t_z_log.float(), dim=-1), 
+            F.log_softmax(frozen_z_log.float(), dim=-1).detach(), 
+            reduction='none', log_target=True
+        ).sum(-1).mean()
+        # =======================================
+
         s_embed_matrix = student.get_input_embeddings().weight
         t_z_probs = F.gumbel_softmax(t_z_log.float(), tau=tau, hard=True, dim=-1).to(s_embed_matrix.dtype)
         soft_z_embeds = torch.matmul(t_z_probs, s_embed_matrix.detach())
@@ -488,7 +505,7 @@ def run_learner(rank, data_queue, sync_queue):
         kl_student, kl_teacher, entropy = kl_balanced(t_z_log, s_z_log)
         
         sl = s_ce + (cfg.kl_balance_alpha * beta) * kl_student
-        tl = t_ce + beta * kl_teacher
+        tl = t_ce + beta * kl_teacher + 2.0 * kl_frozen
         
         total_loss = (sl + tl) / cfg.grad_accum
         total_loss.backward()
@@ -497,7 +514,7 @@ def run_learner(rank, data_queue, sync_queue):
             total_loss.item() * cfg.grad_accum,
             s_ce.item(), kl_student.item(),
             t_ce.item(), kl_teacher.item(),
-            entropy.item(),
+            entropy.item(), kl_frozen.item(),
             time.time() - t0
         )
         
