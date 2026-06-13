@@ -1,0 +1,5 @@
+bitsandbytes==0.42.0
+transformers
+datasets
+accelerate
+wandb
