@@ -54,7 +54,7 @@ class Logger:
         self._n         += 1
         self._step_times.append(step_t)
 
-    def log_step(self, step, beta, lr, mem_l):
+    def log_step(self, step, samples, beta, lr, mem_l):
         n = self._n or 1
         avg_t = sum(self._step_times[-20:]) / len(self._step_times[-20:]) if self._step_times else 0
         eta   = avg_t * (cfg.max_steps - step)
@@ -64,7 +64,7 @@ class Logger:
         pct = 100 * step / cfg.max_steps
 
         print(
-            f"\r[{bar}] {pct:4.1f}%  step={step}/{cfg.max_steps}"
+            f"\r[{bar}] {pct:4.1f}%  samples={samples}  step={step}/{cfg.max_steps}"
             f"  loss={self.s['loss']/n:.3f}"
             f"  s_ce={self.s['s_ce']/n:.3f}  s_kl={self.s['s_kl']/n:.3f}"
             f"  t_ce={self.s['t_ce']/n:.3f}  t_kl={self.s['t_kl']/n:.3f}"
@@ -326,7 +326,8 @@ def run_learner(rank, data_queue, sync_queue):
         # Логирование
         if step % cfg.log_every == 0 and step > 0:
             mem_l = torch.cuda.max_memory_allocated(cfg.learner_device) / 1e9
-            logger.log_step(step, beta, lr, mem_l)
+            samples_processed = step * cfg.learner_batch_size
+            logger.log_step(step, samples_processed, beta, lr, mem_l)
             
         if step % cfg.sample_every == 0:
             logger.log_sample(step, batch, z_list, s_logits, s_ym, tokenizer, beta)
