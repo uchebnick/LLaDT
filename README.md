@@ -54,7 +54,7 @@ $$
 The Teacher learns to generate useful latents while predicting the answer. An entropy bonus $\mathcal{H}(q)$ encourages the Teacher to explore less predictable latent distributions, preventing posterior collapse:
 
 $$
-L_t = \text{CE}(A \mid \text{ctx}) + \beta \cdot \text{KL}(q_\phi \parallel p_\theta) - \text{ent\_coef} \cdot \mathcal{H}(q_\phi)
+L_t = \text{CE}(A \mid \text{ctx}) + \beta \cdot \text{KL}(q_\phi \parallel p_\theta) - \lambda_{\text{ent}} \cdot \mathcal{H}(q_\phi)
 $$
 
 ### 2. Anti-Shortcut (Mutual Information Penalty)
