@@ -1,19 +1,12 @@
 """
 Latent Reasoning via ELBO — Qwen3.5-0.8B  v2
 =============================================
-Изменения vs v1:
-  • latent_len = 128  (было 32)
-  • beta_end   = 3.0  (было 1.0) — давит читаемость учителя
-  • entropy bonus для учителя: −entropy_coef · H(q)
-    стимулирует учителя генерировать менее предсказуемые z
-  • Компактный прогресс-бар + подробный z-сэмпл каждые sample_every шагов
-
 Архитектура:
   Учитель  q_φ : [Q, A, <think>, z₁…z₁₂₈]        — видит A до z
   Ученик   p_θ : [Q, <think>, z₁…z₁₂₈, </think>, A]  — не видит A до z
 
-  L_student = CE(A|z,Q)  + β · KL(q‖p)
-  L_teacher = CE(A|ctx) + β · KL(q‖p)  − ent_coef · H(q)
+  L_student = CE(A|z,Q)  + alpha * β · KL_student(p‖q)
+  L_teacher = CE(A|ctx) + β · KL_teacher(q‖p)
 """
 
 import os
@@ -39,11 +32,11 @@ class Config:
     max_train_samples: int = 50_000
     max_q_tokens: int      = 192
     max_a_tokens: int      = 48
-    latent_len: int        = 128          # ↑ было 32
+    latent_len: int        = 128
 
-    # ELBO
-    beta: float            = 1.0          # Constant KL weight
-    kl_balance_alpha: float = 0.05        # Доля градиента для Студента (Prior)
+    # ELBO / KL Balancing
+    beta: float            = 1.0          # KL divergence loss coefficient
+    kl_balance_alpha: float = 0.05        # Доля градиента для Студента (Учитель получает 1.0)
     
     # Gumbel-Softmax
     tau_start: float       = 2.0
@@ -51,22 +44,22 @@ class Config:
     tau_anneal_steps: int  = 400
 
     # Обучение
-    batch_size: int        = 1            # на 1 GPU
-    grad_accum: int        = 16           # эфф. batch = 1 * 2(gpus) * 16 = 32
-    lr: float              = 1e-4         # Увеличено для "широкой" LoRA
+    batch_size: int        = 1
+    grad_accum: int        = 16
+    lr: float              = 1e-4
     max_steps: int         = 1000
     warmup_steps: int      = 100
     max_grad_norm: float   = 1.0
 
     # LoRA
-    lora_r: int            = 128          # Огромная LoRA (~65M параметров)
+    lora_r: int            = 128
     lora_alpha: int        = 256
     lora_dropout: float    = 0.05
 
     # Железо
     dtype: str             = "float16"
     teacher_device: str    = "cuda:0"
-    student_device: str    = "cuda:0"     # cuda:1 если две GPU
+    student_device: str    = "cuda:0"
 
     # Логирование
     log_every: int         = 10
@@ -79,7 +72,6 @@ cfg = Config()
 os.makedirs(cfg.output_dir, exist_ok=True)
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
-
 
 # ══════════════════════════════════════════════════════════════
 #  Утилиты
@@ -118,7 +110,6 @@ class CrossDeviceCopy(torch.autograd.Function):
     def backward(ctx, g):
         return g.to(ctx.src), None
 
-
 # ══════════════════════════════════════════════════════════════
 #  Датасет
 # ══════════════════════════════════════════════════════════════
@@ -146,16 +137,11 @@ class MathQADataset(Dataset):
     def __len__(self):  return len(self.samples)
     def __getitem__(self, i): return self.samples[i]
 
-
 # ══════════════════════════════════════════════════════════════
 #  Построение последовательностей
 # ══════════════════════════════════════════════════════════════
 
 def build_sequences(batch, tokenizer, z_list):
-    """
-    Учитель : [BOS, Q, A, <think>, z₁…zN]
-    Ученик  : [BOS, Q, <think>, z₁…zN, </think>, \nA: , a]
-    """
     def tok(t): return tokenizer(t, add_special_tokens=False)["input_ids"]
 
     TS = tok("<think>\n"); TE = tok("\n</think>\n"); AP = tok("\nA: ")
@@ -215,7 +201,6 @@ def _mask(length, start, end):
         m[j] = True
     return m
 
-
 # ══════════════════════════════════════════════════════════════
 #  Логиты по маске и Soft Embeddings
 # ══════════════════════════════════════════════════════════════
@@ -225,11 +210,7 @@ def build_student_inputs_embeds(student, s_input_ids, s_z_mask, soft_z_embeds, d
     base_embeds = embed_layer(s_input_ids.to(device))
     z_mask_dev = s_z_mask.to(device)
     
-    # Клонируем для сохранения графа и избежания изменения leaf-тензора (хотя base_embeds — результат функции)
     result = base_embeds.clone()
-    
-    # Маска s_z_mask имеет ровно cfg.latent_len True-значений для каждого батча.
-    # soft_z_embeds имеет форму (B, L_z, D). Их можно просто заассайнить:
     result[z_mask_dev] = soft_z_embeds.reshape(-1, base_embeds.size(-1))
     
     return result
@@ -250,13 +231,11 @@ def masked_logits(logits, mask, Z):
         out.append(chunk)
     return torch.stack(out)   # (B, Z, V)
 
-
 # ══════════════════════════════════════════════════════════════
 #  Loss-функции
 # ══════════════════════════════════════════════════════════════
 
 def ce_on_mask(logits, ids, mask):
-    """Cross-entropy (СУММА по длине, СРЕДНЕЕ по батчу) - Оптимизированная версия"""
     B, L, V = logits.shape
     logits_shift = logits[:, :-1]
     targets = ids[:, 1:]
@@ -269,10 +248,7 @@ def ce_on_mask(logits, ids, mask):
     valid_logits = logits_shift.reshape(-1, V)[valid_idx]
     valid_targets = targets.reshape(-1)[valid_idx]
     
-    # Считаем сумму CE только для целевых токенов
     sum_ce = F.cross_entropy(valid_logits.float(), valid_targets, reduction="sum")
-    
-    # Делим на размер батча B, чтобы получить (Сумма_на_последовательность).mean()
     return sum_ce / B
 
 def kl_balanced(q_logits, p_logits):
@@ -290,13 +266,11 @@ def kl_balanced(q_logits, p_logits):
     
     return kl_student, kl_teacher
 
-
 # ══════════════════════════════════════════════════════════════
 #  Логирование
 # ══════════════════════════════════════════════════════════════
 
 class Logger:
-    """Накапливает метрики и печатает компактную строку + красивый z-сэмпл."""
     def __init__(self):
         self.reset()
         self._t0 = time.time()
@@ -337,20 +311,17 @@ class Logger:
         self.reset()
 
     def log_sample(self, step, batch, z_list, s_logits, s_ym, tokenizer, beta):
-        """Красивый z-сэмпл — показывает как учитель эволюционирует."""
         z0     = z_list[0]
         z_text = tokenizer.decode(z0, skip_special_tokens=False)
         uniq   = len(set(z0))
         top    = Counter(z0).most_common(8)
 
-        # Предсказание ученика
         y_idx = s_ym[0].nonzero(as_tuple=True)[0]
         pred_a = ""
         if len(y_idx) > 0:
             pred_ids = s_logits[0, y_idx[0]-1:y_idx[-1]].argmax(-1)
             pred_a   = tokenizer.decode(pred_ids.cpu(), skip_special_tokens=True)
 
-        # Читаемость z: доля токенов которые декодируются в обычные слова
         readable = sum(1 for t in z0
                        if tokenizer.decode([t]).strip()
                        and tokenizer.decode([t]).strip()[0].isalpha())
@@ -385,7 +356,6 @@ class Logger:
         wandb.log({k: v/n for k, v in self.s.items()} |
                   {"beta": beta, "lr": lr, "step": step})
 
-
 # ══════════════════════════════════════════════════════════════
 #  Главный цикл
 # ══════════════════════════════════════════════════════════════
@@ -400,8 +370,8 @@ def train():
 
     if accelerator.is_main_process:
         print("═══════════════════════════════════════════════════════════════════")
-        print(f"  Latent Reasoning ELBO  ·  {cfg.model_name}")
-        print(f"  latent_len={cfg.latent_len}  β: {cfg.beta_start} → {cfg.beta_peak} → {cfg.beta_final}")
+        print(f"  Latent Reasoning KL-Balanced ELBO  ·  {cfg.model_name}")
+        print(f"  latent_len={cfg.latent_len}  β: {cfg.beta}  α_s: {cfg.kl_balance_alpha}")
         print("═══════════════════════════════════════════════════════════════════")
 
     print("📦 Токенизатор...")
@@ -477,9 +447,7 @@ def train():
                 gids[i, mp-len(p):] = torch.tensor(p, dtype=torch.long)
                 gmsk[i, mp-len(p):] = 1
 
-            # Фиксированная температура
             gen_temp = 0.6
-            
             with torch.no_grad():
                 gen = accelerator.unwrap_model(teacher).generate(
                     input_ids=gids, attention_mask=gmsk,
@@ -520,29 +488,28 @@ def train():
                 s_logits = s_out.logits
                 s_z_log  = masked_logits(s_logits, s_zm_log, cfg.latent_len)
 
-                # ── 4. Считаем Loss ──
+                # ── 5. Считаем Loss & KL Balancing ──
                 t_z_on_s = CrossDeviceCopy.apply(t_z_log, cfg.student_device)
                 s_z_on_t = CrossDeviceCopy.apply(s_z_log, cfg.teacher_device)
 
                 s_ce = ce_on_mask(s_logits, s_ids, s_ym)
                 t_ce = ce_on_mask(t_logits, t_ids, t_ym)
 
-                # Вычисляем KL Balancing на Teacher Device (там находится s_z_on_t)
+                # KL Balancing
                 kl_student, kl_teacher = kl_balanced(t_z_log, s_z_on_t)
 
-                # Лосс Студента: минимизирует CE ответа и медленно подтягивает свой prior к Учителю
+                # Лосс Студента: CE ответа + ослабленный KL
                 sl = s_ce + (cfg.kl_balance_alpha * beta) * kl_student.to(cfg.student_device)
 
-                # Лосс Учителя: минимизирует CE ответа и жестко штрафуется за уход от prior'а Студента
+                # Лосс Учителя: CE ответа + полный KL
                 tl = t_ce + beta * kl_teacher
 
-                # ── 5. Оптимизация ──
+                # ── 6. Оптимизация: совместный backward для экономии памяти ──
                 total_loss = sl + tl.to(sl.device)
                 accelerator.backward(total_loss)
-                
                 logger.update(sl.item(), s_ce.item(), kl_student.item(), t_ce.item(), kl_teacher.item(), time.time() - t0)
 
-                # ── 6. Optimizer step ──
+                # ── 7. Optimizer step ──
                 lr = get_lr(step)
                 for opt, model in [(opt_t, teacher), (opt_s, student)]:
                     for g in opt.param_groups: g["lr"] = lr
@@ -550,7 +517,7 @@ def train():
                         accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
                     opt.step(); opt.zero_grad()
 
-            # ── 7. Логирование ──
+            # ── 8. Логирование ──
             if accelerator.is_main_process:
                 if step % cfg.log_every == 0 and step > 0:
                     mt = torch.cuda.max_memory_allocated(cfg.teacher_device) / 1e9
@@ -584,12 +551,10 @@ def train():
 
 
 if __name__ == "__main__":
-    import os, sys
     if "LOCAL_RANK" not in os.environ:
         os.environ["HF_TOKEN"] = "hf_YOUR_TOKEN_HERE"
         os.system("pip install bitsandbytes accelerate datasets git+https://github.com/huggingface/transformers.git wandb peft")
 
-        import torch
         num_gpus = torch.cuda.device_count()
         for i in range(num_gpus):
             cap = torch.cuda.get_device_capability(i)
