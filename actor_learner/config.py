@@ -13,7 +13,7 @@ class Config:
 
     # ELBO / KL Balancing
     beta: float            = 1.0          # KL divergence loss coefficient
-    kl_balance_alpha: float = 0.05        # Доля градиента для Студента (Учитель получает 1.0)
+    kl_balance_alpha: float = 0.15        # Доля градиента для Студента (Учитель получает 1.0)
     
     # Gumbel-Softmax
     tau_start: float       = 2.0
