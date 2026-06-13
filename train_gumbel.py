@@ -351,6 +351,11 @@ class Logger:
         self._step_times = []
 
     def reset(self):
+        if hasattr(self, '_n') and self._n > 0:
+            self.last_logged_ent = self.s.get("t_ent", 0.0) / self._n
+        elif not hasattr(self, 'last_logged_ent'):
+            self.last_logged_ent = 0.0
+            
         self.s = dict(loss=0., s_ce=0., s_kl=0., t_ce=0., t_kl=0., t_ent=0., t_ent_g=0., mi_ce=0.)
         self._n = 0
 
@@ -530,11 +535,8 @@ def train():
                 gmsk[i, mp-len(p):] = 1
 
             # Adaptive Temperature Annealing for Generation
-            # If H(q) grows too large (approaching uniform distribution / posterior collapse),
-            # we lower the generation temperature to force the teacher to pick sharper, more distinct tokens.
-            last_ent = logger.s.get('t_ent', 0.0)
-            if logger._n > 0: last_ent /= logger._n
-            gen_temp = max(0.3, 0.9 - max(0.0, (last_ent - 10.0)) * 0.05)
+            # Динамическая температура для генерации примеров (от 0.3 до 0.9 в зависимости от H_local)
+            gen_temp = max(0.3, 0.9 - max(0.0, (logger.last_logged_ent - 10.0)) * 0.05)
             
             with torch.no_grad():
                 gen = accelerator.unwrap_model(teacher).generate(
@@ -576,12 +578,15 @@ def train():
                 s_logits = s_out.logits
                 s_z_log  = masked_logits(s_logits, s_zm_log, cfg.latent_len)
 
-                # ── Anti-Shortcut (MI Penalty) ──
-                # Заставляем Учителя не передавать ответ напрямую в z
-                # Студент пытается угадать A, видя только z (Q скрыто маской)
+                # ── 4. Anti-Shortcut Penalty (Студент без Q) ──
                 s_at_no_q = s_at.clone()
-                s_at_no_q[s_qm] = 0
-                s_out_no_q = student(inputs_embeds=s_inputs_embeds, attention_mask=s_at_no_q)
+                s_at_no_q[s_qm] = 0  # маскируем Q в attention
+                
+                # ДЛЯ ПАРАНОИ: Физически зануляем эмбеддинги Q, чтобы исключить любые утечки
+                s_inputs_embeds_no_q = s_inputs_embeds.clone()
+                s_inputs_embeds_no_q[s_qm] = 0.0
+
+                s_out_no_q = student(inputs_embeds=s_inputs_embeds_no_q, attention_mask=s_at_no_q)
                 ce_z_only = ce_on_mask(s_out_no_q.logits, s_ids, s_ym)
                 # Штраф-порог: если mi падает ниже mi_target (15.0), начинаем сильно бить Учителя
                 anti_shortcut_loss = F.relu(cfg.mi_target - ce_z_only) * cfg.mi_coef
