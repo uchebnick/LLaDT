@@ -231,15 +231,14 @@ class Logger:
         self._step_times = []
 
     def reset(self):
-        self.s = {"loss": 0, "ce": 0, "kl": 0, "ent": 0, "kl_frz": 0}
+        self.s = {"loss": 0, "ce": 0, "kl": 0, "ent": 0}
         self._n = 0
 
-    def update(self, loss, ce, kl, ent, kl_frz, step_t):
+    def update(self, loss, ce, kl, ent, step_t):
         self.s["loss"] += loss
         self.s["ce"] += ce
         self.s["kl"] += kl
         self.s["ent"]  += ent
-        self.s["kl_frz"] += kl_frz
         self._n         += 1
         self._step_times.append(step_t)
 
@@ -256,7 +255,7 @@ class Logger:
             f"\r[{bar}] {pct:4.1f}%  samples={samples}  step={step}/{cfg.max_steps}"
             f"  loss={self.s['loss']/n:.3f}"
             f"  ce={self.s['ce']/n:.3f}  kl={self.s['kl']/n:.3f}"
-            f"  ent={self.s['ent']/n:.3f}  kl_frz={self.s['kl_frz']/n:.3f}"
+            f"  ent={self.s['ent']/n:.3f}"
             f"  β={beta:.2f}  lr={lr:.1e}"
             f"  {avg_t:.2f}s/it  ⏱{fmt_time(elapsed)}  ETA={fmt_time(eta)}"
             f"  VRAM=[{mem_l:.1f}]G",
@@ -462,19 +461,6 @@ def run_learner(rank, data_queue, sync_queue):
         q_out = model(input_ids=t_ids, attention_mask=t_at)
         q_z_log = masked_logits(q_out.logits, t_zm_log, cfg.latent_len)
         
-        # Получаем логиты от замороженной базовой модели (без LoRA)
-        with model.disable_adapter():
-            with torch.no_grad():
-                frozen_out = model(input_ids=t_ids, attention_mask=t_at)
-                frozen_z_log = masked_logits(frozen_out.logits, t_zm_log, cfg.latent_len)
-                
-        # Штрафуем Учителя за отклонение от базового английского языка
-        kl_frozen = F.kl_div(
-            F.log_softmax(q_z_log.float(), dim=-1), 
-            F.log_softmax(frozen_z_log.float(), dim=-1).detach(), 
-            reduction='none', log_target=True
-        ).sum(-1).mean()
-
         # 2. p(z|Q) - Ученик (видит только Q)
         p_out = model(input_ids=s_ids, attention_mask=s_at)
         p_z_log = masked_logits(p_out.logits, s_zm_log, cfg.latent_len)
@@ -494,13 +480,13 @@ def run_learner(rank, data_queue, sync_queue):
         
         ce = ce_on_mask(a_out.logits, s_ids, s_ym)
         
-        total_loss = (ce + beta * kl + 2.0 * kl_frozen) / cfg.grad_accum
+        total_loss = (ce + beta * kl) / cfg.grad_accum
         total_loss.backward()
         
         logger.update(
             total_loss.item() * cfg.grad_accum,
             ce.item(), kl.item(),
-            entropy.item(), kl_frozen.item(),
+            entropy.item(),
             time.time() - t0
         )
         
