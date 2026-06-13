@@ -36,37 +36,37 @@ def run_actor(rank, data_queue, sync_queue):
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, trust_remote_code=True)
     if tokenizer.pad_token_id is None: tokenizer.pad_token_id = tokenizer.eos_token_id
     
-    lora_cfg = LoraConfig(
-        r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
-        target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
-        bias="none", task_type="CAUSAL_LM",
-    )
-    
-    teacher = AutoModelForCausalLM.from_pretrained(
+    base_model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name, torch_dtype=dtype,
         device_map={"": cfg.actor_device}, trust_remote_code=True,
         attn_implementation="sdpa")
-    teacher = get_peft_model(teacher, lora_cfg)
-    teacher.eval()
+    
+    peft_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=cfg.lora_r,
+        lora_alpha=cfg.lora_alpha,
+        lora_dropout=cfg.lora_dropout,
+        target_modules=["q_proj", "v_proj"]
+    )
+    model = get_peft_model(base_model, peft_config)
+    model.eval()
     
     ds = MathQADataset(tokenizer, max_samples=cfg.max_train_samples)
-    # Используем бесконечный загрузчик, потому что Actor крутится пока жив Learner
     loader = DataLoader(ds, batch_size=cfg.actor_batch_size, shuffle=True, drop_last=True)
     
-    gen_temp = 0.6
     pad = tokenizer.pad_token_id
     
     step = 0
     while True:
         for batch in loader:
-            # 1. Проверяем синхронизацию весов
-            if not sync_queue.empty():
-                try:
-                    new_state_dict = sync_queue.get_nowait()
-                    teacher.load_state_dict(new_state_dict, strict=False)
+            # 1. Проверяем новые веса
+            try:
+                state_dict = sync_queue.get_nowait()
+                model.load_state_dict(state_dict, strict=False)
+                if step % 10 == 0:
                     print(f"[Actor] Received updated LoRA weights at step {step}")
-                except Exception:
-                    pass
+            except queue.Empty:
+                pass
 
             t0 = time.time()
             prompts = []
@@ -86,10 +86,10 @@ def run_actor(rank, data_queue, sync_queue):
                 gmsk[i, mp_len-len(p):] = 1
                 
             with torch.no_grad():
-                gen = teacher.generate(
+                gen = model.generate(
                     input_ids=gids, attention_mask=gmsk,
                     max_new_tokens=cfg.latent_len, min_new_tokens=cfg.latent_len,
-                    do_sample=True, temperature=gen_temp, top_p=0.9,
+                    do_sample=True, temperature=1.0,
                     pad_token_id=pad, use_cache=True)
                     
             z_list = []

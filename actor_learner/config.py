@@ -12,8 +12,7 @@ class Config:
     latent_len: int        = 64
 
     # ELBO / KL Balancing
-    beta: float            = 5.0          # Огромный штраф, чтобы Учитель боялся шифров
-    kl_balance_alpha: float = 0.05        # Делаем ученика "тугим" на новые языки
+    beta: float            = 5.0          # KL divergence penalty
     
     # Gumbel-Softmax
     tau_start: float       = 2.0

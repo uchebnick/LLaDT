@@ -42,17 +42,14 @@ class Logger:
         self._step_times = []
 
     def reset(self):
-        self.s = {"loss": 0, "s_ce": 0, "s_kl": 0, "t_ce": 0, "t_kl": 0, "ent": 0, "kl_frz": 0}
+        self.s = {"loss": 0, "ce": 0, "kl": 0, "ent": 0}
         self._n = 0
 
-    def update(self, loss, s_ce, s_kl, t_ce, t_kl, ent, kl_frz, step_t):
+    def update(self, loss, ce, kl, ent, step_t):
         self.s["loss"] += loss
-        self.s["s_ce"] += s_ce
-        self.s["s_kl"] += s_kl
-        self.s["t_ce"] += t_ce
-        self.s["t_kl"] += t_kl
+        self.s["ce"] += ce
+        self.s["kl"] += kl
         self.s["ent"]  += ent
-        self.s["kl_frz"] += kl_frz
         self._n         += 1
         self._step_times.append(step_t)
 
@@ -68,9 +65,8 @@ class Logger:
         print(
             f"\r[{bar}] {pct:4.1f}%  samples={samples}  step={step}/{cfg.max_steps}"
             f"  loss={self.s['loss']/n:.3f}"
-            f"  s_ce={self.s['s_ce']/n:.3f}  s_kl={self.s['s_kl']/n:.3f}"
-            f"  t_ce={self.s['t_ce']/n:.3f}  t_kl={self.s['t_kl']/n:.3f}"
-            f"  ent={self.s['ent']/n:.3f}  kl_frz={self.s['kl_frz']/n:.3f}"
+            f"  ce={self.s['ce']/n:.3f}  kl={self.s['kl']/n:.3f}"
+            f"  ent={self.s['ent']/n:.3f}"
             f"  β={beta:.2f}  lr={lr:.1e}"
             f"  {avg_t:.2f}s/it  ⏱{fmt_time(elapsed)}  ETA={fmt_time(eta)}"
             f"  VRAM=[{mem_l:.1f}]G",
@@ -172,8 +168,8 @@ def build_sequences(batch, tokenizer, z_list, device):
     s_ids, s_at, (szm_log, szm_embed, sym, sqm) = _pad(s_seqs, [s_zm_log, s_zm_embed, s_ym, s_qm], device)
     return (t_ids, t_at, tzm_log, tym), (s_ids, s_at, szm_log, szm_embed, sym, sqm)
 
-def build_student_inputs_embeds(student, s_input_ids, s_z_mask, soft_z_embeds, device):
-    embed_layer = student.get_input_embeddings()
+def build_student_inputs_embeds(model, s_input_ids, s_z_mask, soft_z_embeds, device):
+    embed_layer = model.get_input_embeddings()
     base_embeds = embed_layer(s_input_ids)
     result = base_embeds.clone()
     result[s_z_mask] = soft_z_embeds.reshape(-1, base_embeds.size(-1))
@@ -210,14 +206,18 @@ def ce_on_mask(logits, ids, mask):
 def kl_balanced(q_logits, p_logits):
     q_log = F.log_softmax(q_logits.float(), dim=-1)
     p_log = F.log_softmax(p_logits.float(), dim=-1)
-    kl_student = F.kl_div(q_log.detach(), p_log, reduction='none', log_target=True).sum(-1).mean()
-    kl_teacher = F.kl_div(q_log, p_log.detach(), reduction='none', log_target=True).sum(-1).mean()
     
-    # Entropy of teacher: H(q) = -sum(q * log(q))
+    # Спортивный KL, где градиенты текут в обе стороны (симметричный)
+    kl_qp = F.kl_div(p_log, q_log.exp(), reduction='none', log_target=False).sum(-1).mean()
+    kl_pq = F.kl_div(q_log, p_log.exp(), reduction='none', log_target=False).sum(-1).mean()
+    
+    kl = 0.5 * (kl_qp + kl_pq)
+    
+    # Entropy of q: H(q) = -sum(q * log(q))
     q_prob = q_log.exp()
     entropy = -(q_prob * q_log).sum(dim=-1).mean()
     
-    return kl_student, kl_teacher, entropy
+    return kl, entropy
 
 # =============================================================================
 # Основной процесс
@@ -236,25 +236,16 @@ def run_learner(rank, data_queue, sync_queue):
         bias="none", task_type="CAUSAL_LM",
     )
     
-    teacher = AutoModelForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name, torch_dtype=dtype,
         device_map={"": cfg.learner_device}, trust_remote_code=True,
         attn_implementation="sdpa")
-    teacher = get_peft_model(teacher, lora_cfg)
-    teacher.gradient_checkpointing_enable()
-    teacher.train(); teacher.config.use_cache = False
+    model = get_peft_model(model, lora_cfg)
+    model.gradient_checkpointing_enable()
+    model.train(); model.config.use_cache = False
     
-    student = AutoModelForCausalLM.from_pretrained(
-        cfg.model_name, torch_dtype=dtype,
-        device_map={"": cfg.learner_device}, trust_remote_code=True,
-        attn_implementation="sdpa")
-    student = get_peft_model(student, lora_cfg)
-    student.gradient_checkpointing_enable()
-    student.train(); student.config.use_cache = False
-
     import bitsandbytes as bnb
-    opt_t = bnb.optim.PagedAdamW8bit(teacher.parameters(), lr=cfg.lr, weight_decay=0.01)
-    opt_s = bnb.optim.PagedAdamW8bit(student.parameters(), lr=cfg.lr, weight_decay=0.01)
+    opt = bnb.optim.PagedAdamW8bit(model.parameters(), lr=cfg.lr, weight_decay=0.01)
 
     logger = Logger()
     
@@ -275,73 +266,50 @@ def run_learner(rank, data_queue, sync_queue):
                 print("[Learner] Queue empty for 60s. Actor might have crashed. Exiting.")
                 import sys; sys.exit(1)
             
-        (t_ids, t_at, t_zm_log, t_ym), \
-        (s_ids, s_at, s_zm_log, s_zm_embed, s_ym, s_qm) = build_sequences(batch, tokenizer, z_list, cfg.learner_device)
+        (t_ids, t_at, t_zm_log, t_ym),         (s_ids, s_at, s_zm_log, s_zm_embed, s_ym, s_qm) = build_sequences(batch, tokenizer, z_list, cfg.learner_device)
         
-        t_out = teacher(input_ids=t_ids, attention_mask=t_at)
-        t_logits = t_out.logits
-        t_z_log = masked_logits(t_logits, t_zm_log, cfg.latent_len)
+        # 1. q(z|Q,A) - Учитель (видит Q+A)
+        q_out = model(input_ids=t_ids, attention_mask=t_at)
+        q_z_log = masked_logits(q_out.logits, t_zm_log, cfg.latent_len)
         
-        # === СЕКРЕТНОЕ ОРУЖИЕ ПРОТИВ ШИФРОВ ===
-        # Получаем логиты от замороженной базовой модели (без LoRA)
-        with teacher.disable_adapter():
-            with torch.no_grad():
-                frozen_out = teacher(input_ids=t_ids, attention_mask=t_at)
-                frozen_logits = frozen_out.logits
-                frozen_z_log = masked_logits(frozen_logits, t_zm_log, cfg.latent_len)
-                
-        # Штрафуем Учителя за отклонение от базового английского языка
-        kl_frozen = F.kl_div(
-            F.log_softmax(t_z_log.float(), dim=-1), 
-            F.log_softmax(frozen_z_log.float(), dim=-1).detach(), 
-            reduction='none', log_target=True
-        ).sum(-1).mean()
-        # =======================================
+        # 2. p(z|Q) - Ученик (видит только Q)
+        p_out = model(input_ids=s_ids, attention_mask=s_at)
+        p_z_log = masked_logits(p_out.logits, s_zm_log, cfg.latent_len)
+        
+        # 3. KL Divergence (symmetric)
+        kl, entropy = kl_balanced(q_z_log, p_z_log)
 
-        s_embed_matrix = student.get_input_embeddings().weight
-        t_z_probs = F.gumbel_softmax(t_z_log.float(), tau=tau, hard=True, dim=-1).to(s_embed_matrix.dtype)
-        soft_z_embeds = torch.matmul(t_z_probs, s_embed_matrix.detach())
+        # 4. Предсказание ответа из soft_z
+        embed_matrix = model.get_input_embeddings().weight
+        q_z_probs = F.gumbel_softmax(q_z_log.float(), tau=tau, hard=True, dim=-1).to(embed_matrix.dtype)
+        soft_z_embeds = torch.matmul(q_z_probs, embed_matrix.detach())
         
         s_inputs_embeds = build_student_inputs_embeds(
-            student, s_ids, s_zm_embed, soft_z_embeds, cfg.learner_device
+            model, s_ids, s_zm_embed, soft_z_embeds, cfg.learner_device
         )
-        s_out = student(inputs_embeds=s_inputs_embeds, attention_mask=s_at)
-        s_logits = s_out.logits
-        s_z_log = masked_logits(s_logits, s_zm_log, cfg.latent_len)
+        a_out = model(inputs_embeds=s_inputs_embeds, attention_mask=s_at)
         
-        s_ce = ce_on_mask(s_logits, s_ids, s_ym)
-        t_ce = ce_on_mask(t_logits, t_ids, t_ym)
+        ce = ce_on_mask(a_out.logits, s_ids, s_ym)
         
-        kl_student, kl_teacher, entropy = kl_balanced(t_z_log, s_z_log)
-        
-        sl = s_ce + (cfg.kl_balance_alpha * beta) * kl_student
-        tl = t_ce + beta * kl_teacher + 2.0 * kl_frozen
-        
-        total_loss = (sl + tl) / cfg.grad_accum
+        total_loss = (ce + beta * kl) / cfg.grad_accum
         total_loss.backward()
         
         logger.update(
             total_loss.item() * cfg.grad_accum,
-            s_ce.item(), kl_student.item(),
-            t_ce.item(), kl_teacher.item(),
-            entropy.item(), kl_frozen.item(),
+            ce.item(), kl.item(),
+            entropy.item(),
             time.time() - t0
         )
         
         if (step + 1) % cfg.grad_accum == 0:
             lr = get_lr(step)
-            for opt in [opt_t, opt_s]:
-                for g in opt.param_groups: g["lr"] = lr
-            torch.nn.utils.clip_grad_norm_(teacher.parameters(), cfg.max_grad_norm)
-            torch.nn.utils.clip_grad_norm_(student.parameters(), cfg.max_grad_norm)
-            opt_t.step(); opt_t.zero_grad()
-            opt_s.step(); opt_s.zero_grad()
+            for g in opt.param_groups: g["lr"] = lr
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+            opt.step(); opt.zero_grad()
             
-            # Синхронизация весов Учителя
+            # Синхронизация весов (передаем одну модель)
             if (step // cfg.grad_accum) % cfg.sync_every_n_steps == 0:
-                # Передаем веса в CPU, чтобы избежать утечек CUDA через очередь
-                sd = {k: v.cpu() for k, v in teacher.state_dict().items() if "lora" in k}
-                # Если очередь полна, заменяем старые веса новыми
+                sd = {k: v.cpu() for k, v in model.state_dict().items() if "lora" in k}
                 if sync_queue.full():
                     try: sync_queue.get_nowait()
                     except: pass
@@ -354,6 +322,6 @@ def run_learner(rank, data_queue, sync_queue):
             logger.log_step(step, samples_processed, beta, lr, mem_l)
             
         if step % cfg.sample_every == 0:
-            logger.log_sample(step, batch, z_list, s_logits, s_ym, tokenizer, beta)
+            logger.log_sample(step, batch, z_list, a_out.logits, s_ym, tokenizer, beta)
 
     print("[Learner] Training finished.")
