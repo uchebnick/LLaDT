@@ -289,6 +289,10 @@ def run_learner(rank, data_queue, sync_queue):
         # 3. KL Divergence (symmetric)
         kl, entropy = kl_balanced(q_z_log, p_z_log)
 
+        # Выталкивающий штраф для Учителя: заставляем его отличаться от Ученика минимум на target_kl
+        kl_teacher_only, _ = kl_balanced(q_z_log, p_z_log.detach())
+        kl_push_loss = cfg.gamma_kl * torch.relu(cfg.target_kl - kl_teacher_only)
+
         # 4. Предсказание ответа из soft_z
         embed_matrix = model.get_input_embeddings().weight
         q_z_probs = F.gumbel_softmax(q_z_log.float(), tau=tau, hard=True, dim=-1).to(embed_matrix.dtype)
@@ -303,7 +307,7 @@ def run_learner(rank, data_queue, sync_queue):
         
         ce = ce_on_mask(a_logits, s_ids, s_ym)
         
-        total_loss = (ce + beta * kl) / cfg.grad_accum
+        total_loss = (ce + beta * kl + kl_push_loss) / cfg.grad_accum
         
         ce_val = ce.item()
         kl_val = kl.item()

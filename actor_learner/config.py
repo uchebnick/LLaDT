@@ -16,6 +16,9 @@ class Config:
     beta_end: float        = 1.0          # Плавно поднимаем штраф, чтобы заставить Ученика догонять
     beta_warmup: int       = 800          # Шагов для разогрева beta (ОЧЕНЬ медленно)
     
+    target_kl: float       = 0.5          # Минимальный желаемый KL (чтобы вытолкнуть Учителя)
+    gamma_kl: float        = 0.5          # Сила выталкивания (KL push)
+    
     # Gumbel-Softmax
     tau_start: float       = 2.0
     tau_end: float         = 0.1
