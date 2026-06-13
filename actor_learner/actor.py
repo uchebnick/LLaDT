@@ -18,7 +18,9 @@ class MathQADataset(Dataset):
             q = item.get("problem", "").strip()
             a = self._extract(item)
             if q and a:
-                self.samples.append({"q": q, "a": a})
+                q_len = len(tokenizer(f"Q: {q}\n", add_special_tokens=False)["input_ids"])
+                if q_len <= cfg.max_q_tokens:
+                    self.samples.append({"q": q, "a": a})
         print(f"[Actor] Dataset loaded: {len(self.samples):,} examples")
 
     @staticmethod

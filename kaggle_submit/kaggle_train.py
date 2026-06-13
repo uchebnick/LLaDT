@@ -7,7 +7,7 @@ class Config:
     model_name: str        = "Qwen/Qwen3.5-0.8B"
     dataset_name: str      = "AI-MO/NuminaMath-CoT"
     max_train_samples: int = 50_000
-    max_q_tokens: int      = 192
+    max_q_tokens: int      = 512
     max_a_tokens: int      = 48
     latent_len: int        = 64
 
@@ -88,7 +88,9 @@ class MathQADataset(Dataset):
             q = item.get("problem", "").strip()
             a = self._extract(item)
             if q and a:
-                self.samples.append({"q": q, "a": a})
+                q_len = len(tokenizer(f"Q: {q}\n", add_special_tokens=False)["input_ids"])
+                if q_len <= cfg.max_q_tokens:
+                    self.samples.append({"q": q, "a": a})
         print(f"[Actor] Dataset loaded: {len(self.samples):,} examples")
 
     @staticmethod

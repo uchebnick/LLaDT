@@ -7,7 +7,7 @@ class Config:
     model_name: str        = "Qwen/Qwen3.5-0.8B"
     dataset_name: str      = "AI-MO/NuminaMath-CoT"
     max_train_samples: int = 50_000
-    max_q_tokens: int      = 192
+    max_q_tokens: int      = 512
     max_a_tokens: int      = 48
     latent_len: int        = 64
 
