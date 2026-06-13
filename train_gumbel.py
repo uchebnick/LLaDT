@@ -53,7 +53,7 @@ class Config:
     mi_coef: float         = 1.5          # Сила штрафа, если mi падает ниже mi_target
     
     # Энтропия
-    ent_coef: float        = 0.1          # Коэффициент энтропии (бонус для эксплорейшена)
+    ent_coef: float        = 0.1          # Коэффициент энтропии (ШТРАФ за высокую энтропию)
     
     # Штраф за энтропию не нужен в Gumbel-Softmax, потому что токены всегда дискретные (hard=True)
     tau_start: float       = 2.0
@@ -318,14 +318,13 @@ def student_loss(t_z, s_z, s_all, s_ids, s_ym, beta):
     return ce + beta * kl, ce.item(), kl.item()
 
 def teacher_loss_fn(t_all, t_z, s_z, t_ids, t_ym, beta, ent_coef):
-    """L_t = CE(y) + β·KL - ent_coef·H(q)"""
+    """L_t = CE(y) + β·KL + ent_coef·H(q)"""
     ce       = ce_on_mask(t_all, t_ids, t_ym)
     kl, ent  = kl_and_entropy(t_z, s_z.detach())
     
-    # Мы вычитаем энтропию, чтобы максимизировать её (это бонус за эксплорейшен).
-    # Если мы хотим её минимизировать (настоящий штраф), нужно делать + ent_coef * ent.
-    # В классическом RL/ELBO делают бонус (минус).
-    total_loss = ce + beta * kl - ent_coef * ent
+    # ПРИБАВЛЯЕМ энтропию к лоссу, чтобы минимизировать её (ШТРАФ за высокую энтропию).
+    # Заставляем Учителя быть более уверенным (детерминированным) в выборе латентных токенов.
+    total_loss = ce + beta * kl + ent_coef * ent
     
     return total_loss, ce.item(), kl.item(), ent.item()
 
