@@ -43,11 +43,14 @@ class Config:
 
     # ELBO Curriculum
     beta_start: float      = 0.0
-    beta_peak: float       = 1.6          # Жёсткое давление на сжатие (пик)
+    beta_peak: float       = 1.8          # Жёсткое давление на сжатие (пик)
     beta_final: float      = 0.01         # Финальная бета для работы на качество CE
-    beta_warmup_steps: int = 400          # Фаза 1: 0..400 шагов (подъём до 1.6)
+    beta_warmup_steps: int = 400          # Фаза 1: 0..400 шагов (подъём до 1.8)
     beta_relax_steps: int  = 800          # Фаза 2: 400..800 шагов (спуск до 0.01)
-    mi_coef: float         = 0.5          # Штраф за способность предсказать A только по z
+    
+    # Anti-Shortcut
+    mi_target: float       = 15.0         # Целевой лосс для слепого Студента (как у человеческого текста)
+    mi_coef: float         = 1.5          # Сила штрафа, если mi падает ниже mi_target
     
     # Штраф за энтропию не нужен в Gumbel-Softmax, потому что токены всегда дискретные (hard=True)
     tau_start: float       = 2.0
@@ -561,7 +564,8 @@ def train():
                 s_at_no_q[s_qm] = 0
                 s_out_no_q = student(inputs_embeds=s_inputs_embeds, attention_mask=s_at_no_q)
                 ce_z_only = ce_on_mask(s_out_no_q.logits, s_ids, s_ym)
-                anti_shortcut_loss = -ce_z_only * cfg.mi_coef
+                # Штраф-порог: если mi падает ниже mi_target (15.0), начинаем сильно бить Учителя
+                anti_shortcut_loss = F.relu(cfg.mi_target - ce_z_only) * cfg.mi_coef
                 
                 # Пропускаем градиент штрафа только в soft_z_embeds (чтобы не портить веса Студента)
                 grad_z = torch.autograd.grad(anti_shortcut_loss, soft_z_embeds, retain_graph=True)[0]

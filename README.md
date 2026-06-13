@@ -61,14 +61,14 @@ $$
 
 To prevent the Teacher from using the latent space $z$ as a direct copy-paste channel for the answer $A$, we apply an **Anti-Shortcut Loss**. We run a forward pass of the Student where the Question ($Q$) is masked out, forcing the Student to predict $A$ using *only* $z$. 
 
-We calculate the Cross-Entropy of this "blind" Student and apply it as a *negative* penalty to the latent embeddings:
+We calculate the Cross-Entropy of this "blind" Student and apply a threshold-based penalty to the latent embeddings:
 
 $$
-\mathcal{L}_{\text{anti-shortcut}} = - \text{CE}(A \mid z) \cdot \lambda_{MI}
+\mathcal{L}_{\text{anti-shortcut}} = \lambda_{MI} \cdot \max(0, \ \text{MI}_{\text{target}} - \text{CE}(A \mid z))
 $$
 
-*(where $\lambda_{MI}$ is the `mi_coef`, typically 0.5)*. 
-This explicitly penalizes the Mutual Information between $z$ and $A$ in the absence of $Q$, forcing $z$ to encode the *reasoning process* rather than the final answer.
+*(where $\lambda_{MI}$ is the `mi_coef` (1.5) and $\text{MI}_{\text{target}}$ is typically set to 15.0, reflecting the natural entropy of predicting answers from human reasoning without the question).* 
+This explicitly penalizes the Teacher if the Mutual Information between $z$ and $A$ becomes too high (i.e. if $\text{CE}(A \mid z)$ drops below 15.0), forcing $z$ to encode the *reasoning process* rather than the final answer.
 
 ---
 
