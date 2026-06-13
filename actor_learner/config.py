@@ -20,9 +20,9 @@ class Config:
     tau_anneal_steps: int  = 400
 
     # Обучение
-    actor_batch_size: int  = 16           # Огромный батч для генерации (ведь там только Учитель!)
-    learner_batch_size: int = 8           # Увеличиваем батч для Forward/Backward (было 2)
-    grad_accum: int        = 4            # Уменьшаем, чтобы сохранить эффективный батч 32 (8*4=32)
+    actor_batch_size: int  = 16           # Огромный батч для генерации
+    learner_batch_size: int = 4           # Уменьшаем, чтобы избежать OOM
+    grad_accum: int        = 8            # Увеличиваем, чтобы эффективный батч остался 32
     lr: float              = 3e-4
     max_steps: int         = 1000
     warmup_steps: int      = 100
