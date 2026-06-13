@@ -53,7 +53,8 @@ class Config:
     mi_coef: float         = 1.5          # Сила штрафа, если mi падает ниже mi_target
     
     # Энтропия
-    ent_coef: float        = 0.1          # Коэффициент энтропии (ШТРАФ за высокую энтропию)
+    ent_coef: float        = 0.1          # Коэффициент энтропии (ШТРАФ за высокую локальную энтропию)
+    global_ent_coef: float = 0.5          # Бонус за глобальное разнообразие словаря (InfoMax)
     
     # Штраф за энтропию не нужен в Gumbel-Softmax, потому что токены всегда дискретные (hard=True)
     tau_start: float       = 2.0
@@ -304,9 +305,16 @@ def kl_and_entropy(q_logits, p_logits):
     kl_per_token = F.kl_div(p_log, q_log, reduction='none', log_target=True).sum(-1)
     kl = kl_per_token.mean()
     
-    # Энтропия H(q) для каждого токена: (B, L)
+    # Локальная энтропия H_local(q) для каждого токена: (B, L)
     q = q_log.exp()
     ent_per_token = -(q * q_log).sum(-1)
+    ent_local = ent_per_token.mean()
+    
+    # Глобальная энтропия H_global (InfoMax)
+    q_global = q.mean(dim=1) # (B, V) усредняем вероятности по длине
+    ent_global = -(q_global * (q_global + 1e-9).log()).sum(-1).mean()
+    
+    return kl, ent_local, ent_global
     ent = ent_per_token.mean()
     
     return kl, ent
@@ -314,19 +322,19 @@ def kl_and_entropy(q_logits, p_logits):
 def student_loss(t_z, s_z, s_all, s_ids, s_ym, beta):
     """L_s = CE(y) + β·KL"""
     ce  = ce_on_mask(s_all, s_ids, s_ym)
-    kl, _ = kl_and_entropy(t_z.detach(), s_z)
+    kl, _, _ = kl_and_entropy(t_z.detach(), s_z)
     return ce + beta * kl, ce.item(), kl.item()
 
-def teacher_loss_fn(t_all, t_z, s_z, t_ids, t_ym, beta, ent_coef):
-    """L_t = CE(y) + β·KL + ent_coef·H(q)"""
+def teacher_loss_fn(t_all, t_z, s_z, t_ids, t_ym, beta, ent_coef, global_ent_coef):
+    """L_t = CE(y) + β·KL + ent_coef·H_local - global_ent_coef·H_global"""
     ce       = ce_on_mask(t_all, t_ids, t_ym)
-    kl, ent  = kl_and_entropy(t_z, s_z.detach())
+    kl, ent_local, ent_global  = kl_and_entropy(t_z, s_z.detach())
     
-    # ПРИБАВЛЯЕМ энтропию к лоссу, чтобы минимизировать её (ШТРАФ за высокую энтропию).
-    # Заставляем Учителя быть более уверенным (детерминированным) в выборе латентных токенов.
-    total_loss = ce + beta * kl + ent_coef * ent
+    # ПРИБАВЛЯЕМ локальную энтропию (ШТРАФ за неуверенность)
+    # ВЫЧИТАЕМ глобальную энтропию (БОНУС за богатство словаря)
+    total_loss = ce + beta * kl + ent_coef * ent_local - global_ent_coef * ent_global
     
-    return total_loss, ce.item(), kl.item(), ent.item()
+    return total_loss, ce.item(), kl.item(), ent_local.item(), ent_global.item()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -341,16 +349,17 @@ class Logger:
         self._step_times = []
 
     def reset(self):
-        self.s = dict(loss=0., s_ce=0., s_kl=0., t_ce=0., t_kl=0., t_ent=0., mi_ce=0.)
+        self.s = dict(loss=0., s_ce=0., s_kl=0., t_ce=0., t_kl=0., t_ent=0., t_ent_g=0., mi_ce=0.)
         self._n = 0
 
-    def update(self, loss, s_ce, s_kl, t_ce, t_kl, t_ent, mi_ce, step_t):
+    def update(self, loss, s_ce, s_kl, t_ce, t_kl, t_ent, t_ent_g, mi_ce, step_t):
         self.s["loss"]  += loss
         self.s["s_ce"]  += s_ce
         self.s["s_kl"]  += s_kl
         self.s["t_ce"]  += t_ce
         self.s["t_kl"]  += t_kl
         self.s["t_ent"] += t_ent
+        self.s["t_ent_g"] += t_ent_g
         self.s["mi_ce"] += mi_ce
         self._n         += 1
         self._step_times.append(step_t)
@@ -369,7 +378,7 @@ class Logger:
             f"  loss={self.s['loss']/n:.3f}"
             f"  s_ce={self.s['s_ce']/n:.3f}  s_kl={self.s['s_kl']/n:.3f}"
             f"  t_ce={self.s['t_ce']/n:.3f}  t_kl={self.s['t_kl']/n:.3f}"
-            f"  H(q)={self.s['t_ent']/n:.3f}  mi={self.s['mi_ce']/n:.2f}"
+            f"  H_L={self.s['t_ent']/n:.3f}  H_G={self.s['t_ent_g']/n:.3f}  mi={self.s['mi_ce']/n:.2f}"
             f"  β={beta:.2f}  lr={lr:.1e}"
             f"  {avg_t:.2f}s/it  ⏱{fmt_time(elapsed)}  ETA={fmt_time(eta)}"
             f"  VRAM=[{mem_t:.1f}|{mem_s:.1f}]G",
@@ -588,14 +597,14 @@ def train():
                 sl, s_ce, s_kl = student_loss(
                     t_z_on_s, s_z_log, s_logits, s_ids, s_ym, beta)
 
-                tl, t_ce, t_kl, t_ent = teacher_loss_fn(
+                tl, t_ce, t_kl, t_ent, t_ent_g = teacher_loss_fn(
                     t_logits, t_z_log, s_z_on_t.detach(),
-                    t_ids, t_ym, beta, cfg.ent_coef)
+                    t_ids, t_ym, beta, cfg.ent_coef, cfg.global_ent_coef)
 
                 # ── 6. Оптимизация: совместный backward для экономии памяти ──
                 total_loss = sl + tl.to(sl.device) + surrogate_loss.to(sl.device)
                 accelerator.backward(total_loss)
-                logger.update(sl.item(), s_ce, s_kl, t_ce, t_kl, t_ent, ce_z_only.item(),
+                logger.update(sl.item(), s_ce, s_kl, t_ce, t_kl, t_ent, t_ent_g, ce_z_only.item(),
                               time.time() - t0)
 
                 # ── 6. Optimizer step ──
