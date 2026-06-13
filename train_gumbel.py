@@ -583,7 +583,10 @@ def train():
                 q_mask_expanded = s_qm.unsqueeze(-1).expand_as(s_inputs_embeds)
                 s_inputs_embeds_no_q = s_inputs_embeds * (~q_mask_expanded).float()
 
-                s_out_no_q = student(inputs_embeds=s_inputs_embeds_no_q, attention_mask=s_at_no_q)
+                # Создаём правильные position_ids ДО маскирования Q (фикс бага с RoPE)
+                s_position_ids = (s_at.cumsum(dim=-1) - 1).clamp(min=0)
+                
+                s_out_no_q = student(inputs_embeds=s_inputs_embeds_no_q, attention_mask=s_at_no_q, position_ids=s_position_ids)
                 ce_z_only = ce_on_mask(s_out_no_q.logits, s_ids, s_ym)
                 # Экспоненциальный штраф-стена: если mi падает ниже mi_target (12.0),
                 # градиент взрывается по экспоненте, полностью подавляя CE лосс.
@@ -594,7 +597,8 @@ def train():
                 anti_shortcut_loss = cfg.mi_coef * (torch.exp(diff) - 1.0)
                 
                 # Пропускаем градиент штрафа только в soft_z_embeds (чтобы не портить веса Студента)
-                grad_z = torch.autograd.grad(anti_shortcut_loss, soft_z_embeds, retain_graph=True)[0]
+                # retain_graph=False освобождает граф вычислений слепого Студента, решая утечку VRAM
+                grad_z = torch.autograd.grad(anti_shortcut_loss, soft_z_embeds, retain_graph=False)[0]
                 
                 # Создаем суррогатный лосс для единого backward (решает проблему крэша DDP)
                 surrogate_loss = (soft_z_embeds * grad_z.detach()).sum()
