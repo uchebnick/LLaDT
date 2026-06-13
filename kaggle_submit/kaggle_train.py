@@ -9,7 +9,7 @@ class Config:
     max_train_samples: int = 50_000
     max_q_tokens: int      = 192
     max_a_tokens: int      = 48
-    latent_len: int        = 128
+    latent_len: int        = 64
 
     # ELBO / KL Balancing
     beta_start: float      = 0.01         # Начинаем с малого KL, чтобы Учитель научился извлекать ответ
