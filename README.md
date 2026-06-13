@@ -45,18 +45,28 @@ The objective is derived from the Evidence Lower Bound (ELBO), combining Cross-E
 
 **Student Loss ($L_s$):**
 The Student aims to predict the answer $A$ given the question $Q$ and the latent thought $z$. It is penalized by the KL divergence between its prior over $z$ and the Teacher's posterior:
-$$ L_s = \text{CE}(A \mid z, Q) + \beta \cdot \text{KL}(q_\phi \parallel p_\theta) $$
+
+$$
+L_s = \text{CE}(A \mid z, Q) + \beta \cdot \text{KL}(q_\phi \parallel p_\theta)
+$$
 
 **Teacher Loss ($L_t$):**
 The Teacher learns to generate useful latents while predicting the answer. An entropy bonus $\mathcal{H}(q)$ encourages the Teacher to explore less predictable latent distributions, preventing posterior collapse:
-$$ L_t = \text{CE}(A \mid \text{ctx}) + \beta \cdot \text{KL}(q_\phi \parallel p_\theta) - \text{ent\_coef} \cdot \mathcal{H}(q_\phi) $$
+
+$$
+L_t = \text{CE}(A \mid \text{ctx}) + \beta \cdot \text{KL}(q_\phi \parallel p_\theta) - \text{ent\_coef} \cdot \mathcal{H}(q_\phi)
+$$
 
 ### 2. Anti-Shortcut (Mutual Information Penalty)
 
 To prevent the Teacher from using the latent space $z$ as a direct copy-paste channel for the answer $A$, we apply an **Anti-Shortcut Loss**. We run a forward pass of the Student where the Question ($Q$) is masked out, forcing the Student to predict $A$ using *only* $z$. 
 
 We calculate the Cross-Entropy of this "blind" Student and apply it as a *negative* penalty to the latent embeddings:
-$$ \mathcal{L}_{\text{anti-shortcut}} = - \text{CE}(A \mid z) \cdot \lambda_{MI} $$
+
+$$
+\mathcal{L}_{\text{anti-shortcut}} = - \text{CE}(A \mid z) \cdot \lambda_{MI}
+$$
+
 *(where $\lambda_{MI}$ is the `mi_coef`, typically 0.5)*. 
 This explicitly penalizes the Mutual Information between $z$ and $A$ in the absence of $Q$, forcing $z$ to encode the *reasoning process* rather than the final answer.
 
