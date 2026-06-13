@@ -579,9 +579,12 @@ def train():
                 s_at_no_q = s_at.clone()
                 s_at_no_q[s_qm] = 0  # маскируем Q в attention
                 
-                # ДЛЯ ПАРАНОИ: Физически зануляем эмбеддинги Q, чтобы исключить любые утечки
-                q_mask_expanded = s_qm.unsqueeze(-1).expand_as(s_inputs_embeds)
-                s_inputs_embeds_no_q = s_inputs_embeds * (~q_mask_expanded).float()
+                # Отделяем граф вычислений от s_inputs_embeds, чтобы безопасно 
+                # использовать retain_graph=False и освобождать VRAM без крашей.
+                s_inputs_embeds_no_q = s_inputs_embeds.detach().clone()
+                s_inputs_embeds_no_q[s_qm] = 0.0  # зануляем Q
+                s_z_embeds_dev = CrossDeviceCopy.apply(soft_z_embeds, cfg.student_device)
+                s_inputs_embeds_no_q[s_zm_embed] = s_z_embeds_dev.reshape(-1, s_inputs_embeds.size(-1))
 
                 # Создаём правильные position_ids ДО маскирования Q (фикс бага с RoPE)
                 s_position_ids = (s_at.cumsum(dim=-1) - 1).clamp(min=0)
