@@ -43,14 +43,14 @@ class Config:
 
     # ELBO Curriculum
     beta_start: float      = 0.0
-    beta_peak: float       = 1.7          # Жёсткое давление на сжатие (пик)
+    beta_peak: float       = 1.0          # Жёсткое давление на сжатие (пик)
     beta_final: float      = 0.01         # Финальная бета для работы на качество CE
-    beta_warmup_steps: int = 400          # Фаза 1: 0..400 шагов (подъём до 1.7)
+    beta_warmup_steps: int = 400          # Фаза 1: 0..400 шагов (подъём до 1.0)
     beta_relax_steps: int  = 800          # Фаза 2: 400..800 шагов (спуск до 0.01)
     
     # Anti-Shortcut
-    mi_target: float       = 15.0         # Целевой лосс для слепого Студента (как у человеческого текста)
-    mi_coef: float         = 1.5          # Сила штрафа, если mi падает ниже mi_target
+    mi_target: float       = 16.0         # Целевой лосс для слепого Студента (как у человеческого текста)
+    mi_coef: float         = 1.7          # Сила штрафа, если mi падает ниже mi_target
     
     # Энтропия
     ent_coef: float        = 0.1          # Коэффициент энтропии (ШТРАФ за высокую локальную энтропию)
