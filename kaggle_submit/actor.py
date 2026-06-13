@@ -70,13 +70,15 @@ def run_actor(rank, data_queue, sync_queue):
 
             t0 = time.time()
             prompts = []
-            for item in batch:
-                text = f"Q: {item['q'][:400]}\nA: {item['a'][:80]}\n<think>\n"
+            B = len(batch["q"]) if isinstance(batch, dict) else len(batch)
+            for i in range(B):
+                q = batch["q"][i] if isinstance(batch, dict) else batch[i]["q"]
+                a = batch["a"][i] if isinstance(batch, dict) else batch[i]["a"]
+                text = f"Q: {q[:400]}\nA: {a[:80]}\n<think>\n"
                 ids = tokenizer(text, add_special_tokens=True)["input_ids"]
                 prompts.append(ids[:cfg.max_q_tokens + cfg.max_a_tokens + 10])
                 
             mp_len = max(len(p) for p in prompts)
-            B = len(batch)
             gids = torch.full((B, mp_len), pad, dtype=torch.long, device=cfg.actor_device)
             gmsk = torch.zeros(B, mp_len, dtype=torch.long, device=cfg.actor_device)
             for i, p in enumerate(prompts):

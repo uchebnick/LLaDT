@@ -148,7 +148,6 @@ def run_actor(rank, data_queue, sync_queue):
                 prompts.append(ids[:cfg.max_q_tokens + cfg.max_a_tokens + 10])
                 
             mp_len = max(len(p) for p in prompts)
-            B = len(batch)
             gids = torch.full((B, mp_len), pad, dtype=torch.long, device=cfg.actor_device)
             gmsk = torch.zeros(B, mp_len, dtype=torch.long, device=cfg.actor_device)
             for i, p in enumerate(prompts):
