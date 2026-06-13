@@ -585,8 +585,10 @@ def train():
 
                 s_out_no_q = student(inputs_embeds=s_inputs_embeds_no_q, attention_mask=s_at_no_q)
                 ce_z_only = ce_on_mask(s_out_no_q.logits, s_ids, s_ym)
-                # Штраф-порог: если mi падает ниже mi_target (15.0), начинаем сильно бить Учителя
-                anti_shortcut_loss = F.relu(cfg.mi_target - ce_z_only) * cfg.mi_coef
+                # Экспоненциальный штраф-стена: если mi падает ниже mi_target (16.0),
+                # градиент взрывается по экспоненте, полностью подавляя CE лосс.
+                diff = F.relu(cfg.mi_target - ce_z_only)
+                anti_shortcut_loss = cfg.mi_coef * (torch.exp(diff) - 1.0)
                 
                 # Пропускаем градиент штрафа только в soft_z_embeds (чтобы не портить веса Студента)
                 grad_z = torch.autograd.grad(anti_shortcut_loss, soft_z_embeds, retain_graph=True)[0]
