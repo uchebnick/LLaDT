@@ -43,9 +43,9 @@ class Config:
 
     # ELBO Curriculum
     beta_start: float      = 0.0
-    beta_peak: float       = 2.5          # Жёсткое давление на сжатие (пик)
+    beta_peak: float       = 1.6          # Жёсткое давление на сжатие (пик)
     beta_final: float      = 0.01         # Финальная бета для работы на качество CE
-    beta_warmup_steps: int = 400          # Фаза 1: 0..400 шагов (подъём до 2.5)
+    beta_warmup_steps: int = 400          # Фаза 1: 0..400 шагов (подъём до 1.6)
     beta_relax_steps: int  = 800          # Фаза 2: 400..800 шагов (спуск до 0.01)
     mi_coef: float         = 0.5          # Штраф за способность предсказать A только по z
     
