@@ -50,7 +50,7 @@ class Config:
     
     # Anti-Shortcut
     mi_target: float       = 15.0         # Целевой лосс для слепого Студента (как у человеческого текста)
-    mi_coef: float         = 1.5          # Сила штрафа, если mi падает ниже mi_target
+    mi_coef: float         = 5.0          # Огромная сила штрафа, если mi падает ниже mi_target
     
     # Штраф за энтропию не нужен в Gumbel-Softmax, потому что токены всегда дискретные (hard=True)
     tau_start: float       = 2.0
