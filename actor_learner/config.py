@@ -12,7 +12,9 @@ class Config:
     latent_len: int        = 64
 
     # ELBO / KL Balancing
-    beta: float            = 5.0          # KL divergence penalty
+    beta_start: float      = 0.01         # Начинаем с малого KL, чтобы Учитель научился извлекать ответ
+    beta_end: float        = 2.0          # Плавно поднимаем штраф, чтобы заставить Ученика догонять
+    beta_warmup: int       = 300          # Шагов для разогрева beta
     
     # Gumbel-Softmax
     tau_start: float       = 2.0
@@ -21,8 +23,8 @@ class Config:
 
     # Обучение
     actor_batch_size: int  = 16           # Огромный батч для генерации
-    learner_batch_size: int = 4           # Уменьшаем, чтобы избежать OOM
-    grad_accum: int        = 8            # Увеличиваем, чтобы эффективный батч остался 32
+    learner_batch_size: int = 8           # Увеличиваем батч в 2 раза (VRAM позволяет)
+    grad_accum: int        = 4            # Эффективный батч = 32
     lr: float              = 3e-4
     max_steps: int         = 1000
     warmup_steps: int      = 100
