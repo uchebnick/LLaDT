@@ -45,7 +45,7 @@ class Config:
 
     # Логирование
     log_every: int         = 10
-    sample_every: int      = 100
+    sample_every: int      = 30
     save_every: int        = 500
     output_dir: str        = "./checkpoints_async"
 
