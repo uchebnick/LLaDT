@@ -12,9 +12,9 @@ class Config:
     latent_len: int        = 64
 
     # ELBO / KL Balancing
-    beta_start: float      = 0.01         # Начинаем с малого KL, чтобы Учитель научился извлекать ответ
-    beta_end: float        = 2.0          # Плавно поднимаем штраф, чтобы заставить Ученика догонять
-    beta_warmup: int       = 300          # Шагов для разогрева beta
+    beta_start: float      = 0.001        # Начинаем с малого KL, чтобы Учитель научился извлекать ответ
+    beta_end: float        = 1.0          # Плавно поднимаем штраф, чтобы заставить Ученика догонять
+    beta_warmup: int       = 800          # Шагов для разогрева beta (ОЧЕНЬ медленно)
     
     # Gumbel-Softmax
     tau_start: float       = 2.0
@@ -23,8 +23,8 @@ class Config:
 
     # Обучение
     actor_batch_size: int  = 16           # Огромный батч для генерации
-    learner_batch_size: int = 4           # Уменьшаем батч, чтобы избежать OOM при длинных последовательностях (512 токенов)
-    grad_accum: int        = 8            # Эффективный батч = 32 (4 * 8)
+    learner_batch_size: int = 8           # Увеличиваем батч в 2 раза (VRAM позволяет)
+    grad_accum: int        = 4            # Эффективный батч = 32
     lr: float              = 3e-4
     max_steps: int         = 1000
     warmup_steps: int      = 100
@@ -53,10 +53,7 @@ class Config:
 cfg = Config()
 
 def get_beta(step: int) -> float:
-    if step >= cfg.beta_warmup:
-        return cfg.beta_end
-    progress = step / max(1, cfg.beta_warmup)
-    return cfg.beta_start + (cfg.beta_end - cfg.beta_start) * progress
+    return cfg.beta
 
 def get_tau(step: int) -> float:
     if step >= cfg.tau_anneal_steps:

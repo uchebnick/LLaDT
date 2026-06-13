@@ -12,9 +12,9 @@ class Config:
     latent_len: int        = 64
 
     # ELBO / KL Balancing
-    beta_start: float      = 0.01         # Начинаем с малого KL, чтобы Учитель научился извлекать ответ
-    beta_end: float        = 2.0          # Плавно поднимаем штраф, чтобы заставить Ученика догонять
-    beta_warmup: int       = 300          # Шагов для разогрева beta
+    beta_start: float      = 0.001        # Начинаем с малого KL, чтобы Учитель научился извлекать ответ
+    beta_end: float        = 1.0          # Плавно поднимаем штраф, чтобы заставить Ученика догонять
+    beta_warmup: int       = 800          # Шагов для разогрева beta (ОЧЕНЬ медленно)
     
     # Gumbel-Softmax
     tau_start: float       = 2.0
