@@ -134,10 +134,10 @@ def build_sequences(batch, tokenizer, z_list, device):
         a_ids = tok(item["a"])[:cfg.max_a_tokens]
         z     = z_list[i]
 
-        t = bos + q_ids + a_ids + TS + z
-        tz_s = len(bos) + len(q_ids) + len(a_ids) + len(TS)
+        t = bos + q_ids + AP + a_ids + TS + z
+        tz_s = len(bos) + len(q_ids) + len(AP) + len(a_ids) + len(TS)
         tz_e = tz_s + len(z)
-        ty_s = len(bos) + len(q_ids)
+        ty_s = len(bos) + len(q_ids) + len(AP)
         ty_e = ty_s + len(a_ids)
         t_seqs.append(t)
         t_zm_log.append(_mask(len(t), tz_s - 1, tz_e - 1))

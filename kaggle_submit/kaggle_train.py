@@ -142,12 +142,19 @@ def run_actor(rank, data_queue, sync_queue):
             t0 = time.time()
             prompts = []
             B = len(batch["q"]) if isinstance(batch, dict) else len(batch)
+            def tok(t): return tokenizer(t, add_special_tokens=False)["input_ids"]
+            TS = tok("<think>\n"); AP = tok("\nA: ")
+            bos = [tokenizer.bos_token_id] if tokenizer.bos_token_id else []
+            
             for i in range(B):
                 q = batch["q"][i] if isinstance(batch, dict) else batch[i]["q"]
                 a = batch["a"][i] if isinstance(batch, dict) else batch[i]["a"]
-                text = f"Q: {q[:400]}\nA: {a[:80]}\n<think>\n"
-                ids = tokenizer(text, add_special_tokens=True)["input_ids"]
-                prompts.append(ids[:cfg.max_q_tokens + cfg.max_a_tokens + 10])
+                
+                q_ids = tok(f"Q: {q}\n")[:cfg.max_q_tokens]
+                a_ids = tok(a)[:cfg.max_a_tokens]
+                
+                ids = bos + q_ids + AP + a_ids + TS
+                prompts.append(ids)
                 
             mp_len = max(len(p) for p in prompts)
             gids = torch.full((B, mp_len), pad, dtype=torch.long, device=cfg.actor_device)
@@ -325,10 +332,10 @@ def build_sequences(batch, tokenizer, z_list, device):
         a_ids = tok(item["a"])[:cfg.max_a_tokens]
         z     = z_list[i]
 
-        t = bos + q_ids + a_ids + TS + z
-        tz_s = len(bos) + len(q_ids) + len(a_ids) + len(TS)
+        t = bos + q_ids + AP + a_ids + TS + z
+        tz_s = len(bos) + len(q_ids) + len(AP) + len(a_ids) + len(TS)
         tz_e = tz_s + len(z)
-        ty_s = len(bos) + len(q_ids)
+        ty_s = len(bos) + len(q_ids) + len(AP)
         ty_e = ty_s + len(a_ids)
         t_seqs.append(t)
         t_zm_log.append(_mask(len(t), tz_s - 1, tz_e - 1))
