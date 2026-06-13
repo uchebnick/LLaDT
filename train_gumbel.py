@@ -587,7 +587,10 @@ def train():
                 ce_z_only = ce_on_mask(s_out_no_q.logits, s_ids, s_ym)
                 # Экспоненциальный штраф-стена: если mi падает ниже mi_target (12.0),
                 # градиент взрывается по экспоненте, полностью подавляя CE лосс.
+                # НО мы ограничиваем diff до 3.0 (штраф ~32), чтобы избежать 
+                # экстремального клиппинга градиентов, который замораживает Учителя.
                 diff = F.relu(cfg.mi_target - ce_z_only)
+                diff = torch.clamp(diff, max=3.0)
                 anti_shortcut_loss = cfg.mi_coef * (torch.exp(diff) - 1.0)
                 
                 # Пропускаем градиент штрафа только в soft_z_embeds (чтобы не портить веса Студента)
