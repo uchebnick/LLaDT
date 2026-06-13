@@ -53,7 +53,10 @@ class Config:
 cfg = Config()
 
 def get_beta(step: int) -> float:
-    return cfg.beta
+    if step >= cfg.beta_warmup:
+        return cfg.beta_end
+    progress = step / max(1, cfg.beta_warmup)
+    return cfg.beta_start + (cfg.beta_end - cfg.beta_start) * progress
 
 def get_tau(step: int) -> float:
     if step >= cfg.tau_anneal_steps:
