@@ -172,12 +172,20 @@ def build_sequences(batch, tokenizer, z_list, device):
     s_ids, s_at, (szm_log, szm_embed, sym, sqm) = _pad(s_seqs, [s_zm_log, s_zm_embed, s_ym, s_qm], device)
     return (t_ids, t_at, tzm_log, tym), (s_ids, s_at, szm_log, szm_embed, sym, sqm)
 
-def build_student_inputs_embeds(model, s_input_ids, s_z_mask, soft_z_embeds, device):
-    embed_layer = model.get_input_embeddings()
-    base_embeds = embed_layer(s_input_ids)
-    result = base_embeds.clone()
-    result[s_z_mask] = soft_z_embeds.reshape(-1, base_embeds.size(-1))
-    return result
+def build_student_inputs_embeds(model, s_ids, s_zm_embed, s_qm, soft_z, device):
+    embed_matrix = model.get_input_embeddings().weight
+    s_ids = s_ids.to(device)
+    s_embeds = embed_matrix[s_ids].clone() # [B, L, D], clone to allow inplace modification
+    
+    # Заменяем токены z на soft_z и обнуляем вопрос Q для 3-го прохода (Anti-Shortcut)
+    for i in range(len(s_ids)):
+        z_idx = s_zm_embed[i].nonzero(as_tuple=True)[0]
+        s_embeds[i, z_idx] = soft_z[i, :len(z_idx)]
+        
+        q_idx = s_qm[i].nonzero(as_tuple=True)[0]
+        s_embeds[i, q_idx] = 0.0
+        
+    return s_embeds
 
 def masked_logits(logits, mask, Z):
     B, L, V = logits.shape
@@ -290,7 +298,7 @@ def run_learner(rank, data_queue, sync_queue):
         soft_z_embeds = torch.matmul(q_z_probs, embed_matrix.detach())
         
         s_inputs_embeds = build_student_inputs_embeds(
-            model, s_ids, s_zm_embed, soft_z_embeds, cfg.learner_device
+            model, s_ids, s_zm_embed, s_qm, soft_z_embeds, cfg.learner_device
         )
         a_out = model(inputs_embeds=s_inputs_embeds, attention_mask=s_at)
         a_logits = a_out.logits

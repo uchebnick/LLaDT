@@ -23,8 +23,8 @@ class Config:
 
     # Обучение
     actor_batch_size: int  = 16           # Огромный батч для генерации
-    learner_batch_size: int = 4           # Уменьшаем батч, чтобы избежать OOM при длинных последовательностях (512 токенов)
-    grad_accum: int        = 8            # Эффективный батч = 32 (4 * 8)
+    learner_batch_size: int = 8           # Увеличиваем батч в 2 раза (VRAM позволяет)
+    grad_accum: int        = 4            # Эффективный батч = 32
     lr: float              = 3e-4
     max_steps: int         = 1000
     warmup_steps: int      = 100
@@ -83,29 +83,14 @@ class MathQADataset(Dataset):
         raw = load_dataset(cfg.dataset_name, split="train")
         if max_samples:
             raw = raw.select(range(min(max_samples, len(raw))))
-        
-        # Фильтруем пустые
-        valid_items = []
-        questions = []
+        self.samples = []
         for item in raw:
             q = item.get("problem", "").strip()
             a = self._extract(item)
             if q and a:
-                valid_items.append({"q": q, "a": a})
-                questions.append(f"Q: {q}\n")
-        
-        # Токенизируем батчем (в разы быстрее, спасает от таймаута Learner)
-        if questions:
-            tokenized = tokenizer(questions, add_special_tokens=False)
-            lengths = [len(ids) for ids in tokenized["input_ids"]]
-            
-            self.samples = []
-            for item, q_len in zip(valid_items, lengths):
+                q_len = len(tokenizer(f"Q: {q}\n", add_special_tokens=False)["input_ids"])
                 if q_len <= cfg.max_q_tokens:
-                    self.samples.append(item)
-        else:
-            self.samples = []
-            
+                    self.samples.append({"q": q, "a": a})
         print(f"[Actor] Dataset loaded: {len(self.samples):,} examples")
 
     @staticmethod
@@ -387,12 +372,20 @@ def build_sequences(batch, tokenizer, z_list, device):
     s_ids, s_at, (szm_log, szm_embed, sym, sqm) = _pad(s_seqs, [s_zm_log, s_zm_embed, s_ym, s_qm], device)
     return (t_ids, t_at, tzm_log, tym), (s_ids, s_at, szm_log, szm_embed, sym, sqm)
 
-def build_student_inputs_embeds(model, s_input_ids, s_z_mask, soft_z_embeds, device):
-    embed_layer = model.get_input_embeddings()
-    base_embeds = embed_layer(s_input_ids)
-    result = base_embeds.clone()
-    result[s_z_mask] = soft_z_embeds.reshape(-1, base_embeds.size(-1))
-    return result
+def build_student_inputs_embeds(model, s_ids, s_zm_embed, s_qm, soft_z, device):
+    embed_matrix = model.get_input_embeddings().weight
+    s_ids = s_ids.to(device)
+    s_embeds = embed_matrix[s_ids].clone() # [B, L, D], clone to allow inplace modification
+    
+    # Заменяем токены z на soft_z и обнуляем вопрос Q для 3-го прохода (Anti-Shortcut)
+    for i in range(len(s_ids)):
+        z_idx = s_zm_embed[i].nonzero(as_tuple=True)[0]
+        s_embeds[i, z_idx] = soft_z[i, :len(z_idx)]
+        
+        q_idx = s_qm[i].nonzero(as_tuple=True)[0]
+        s_embeds[i, q_idx] = 0.0
+        
+    return s_embeds
 
 def masked_logits(logits, mask, Z):
     B, L, V = logits.shape
@@ -505,7 +498,7 @@ def run_learner(rank, data_queue, sync_queue):
         soft_z_embeds = torch.matmul(q_z_probs, embed_matrix.detach())
         
         s_inputs_embeds = build_student_inputs_embeds(
-            model, s_ids, s_zm_embed, soft_z_embeds, cfg.learner_device
+            model, s_ids, s_zm_embed, s_qm, soft_z_embeds, cfg.learner_device
         )
         a_out = model(inputs_embeds=s_inputs_embeds, attention_mask=s_at)
         a_logits = a_out.logits
