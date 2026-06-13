@@ -49,7 +49,7 @@ class Config:
     beta_relax_steps: int  = 800          # Фаза 2: 400..800 шагов (спуск до 0.01)
     
     # Anti-Shortcut
-    mi_target: float       = 16.0         # Целевой лосс для слепого Студента (как у человеческого текста)
+    mi_target: float       = 15.0         # Целевой лосс для слепого Студента (как у человеческого текста)
     mi_coef: float         = 1.7          # Сила штрафа, если mi падает ниже mi_target
     
     # Энтропия
@@ -585,7 +585,7 @@ def train():
 
                 s_out_no_q = student(inputs_embeds=s_inputs_embeds_no_q, attention_mask=s_at_no_q)
                 ce_z_only = ce_on_mask(s_out_no_q.logits, s_ids, s_ym)
-                # Экспоненциальный штраф-стена: если mi падает ниже mi_target (16.0),
+                # Экспоненциальный штраф-стена: если mi падает ниже mi_target (15.0),
                 # градиент взрывается по экспоненте, полностью подавляя CE лосс.
                 diff = F.relu(cfg.mi_target - ce_z_only)
                 anti_shortcut_loss = cfg.mi_coef * (torch.exp(diff) - 1.0)
