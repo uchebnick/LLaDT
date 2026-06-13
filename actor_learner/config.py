@@ -13,18 +13,18 @@ class Config:
 
     # ELBO / KL Balancing
     beta: float            = 5.0          # Огромный штраф, чтобы Учитель боялся шифров
-    kl_balance_alpha: float = 0.15        # Доля градиента для Студента (Учитель получает 1.0)
+    kl_balance_alpha: float = 0.05        # Делаем ученика "тугим" на новые языки
     
     # Gumbel-Softmax
     tau_start: float       = 2.0
-    tau_end: float         = 0.5
+    tau_end: float         = 0.1
     tau_anneal_steps: int  = 400
 
     # Обучение
     actor_batch_size: int  = 16           # Огромный батч для генерации (ведь там только Учитель!)
     learner_batch_size: int = 8           # Увеличиваем батч для Forward/Backward (было 2)
     grad_accum: int        = 4            # Уменьшаем, чтобы сохранить эффективный батч 32 (8*4=32)
-    lr: float              = 1e-4
+    lr: float              = 3e-4
     max_steps: int         = 1000
     warmup_steps: int      = 100
     max_grad_norm: float   = 1.0
