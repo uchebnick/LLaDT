@@ -13,29 +13,14 @@ class MathQADataset(Dataset):
         raw = load_dataset(cfg.dataset_name, split="train")
         if max_samples:
             raw = raw.select(range(min(max_samples, len(raw))))
-        
-        # Фильтруем пустые
-        valid_items = []
-        questions = []
+        self.samples = []
         for item in raw:
             q = item.get("problem", "").strip()
             a = self._extract(item)
             if q and a:
-                valid_items.append({"q": q, "a": a})
-                questions.append(f"Q: {q}\n")
-        
-        # Токенизируем батчем (в разы быстрее, спасает от таймаута Learner)
-        if questions:
-            tokenized = tokenizer(questions, add_special_tokens=False)
-            lengths = [len(ids) for ids in tokenized["input_ids"]]
-            
-            self.samples = []
-            for item, q_len in zip(valid_items, lengths):
+                q_len = len(tokenizer(f"Q: {q}\n", add_special_tokens=False)["input_ids"])
                 if q_len <= cfg.max_q_tokens:
-                    self.samples.append(item)
-        else:
-            self.samples = []
-            
+                    self.samples.append({"q": q, "a": a})
         print(f"[Actor] Dataset loaded: {len(self.samples):,} examples")
 
     @staticmethod
@@ -113,16 +98,20 @@ def run_actor(rank, data_queue, sync_queue):
             with torch.no_grad():
                 gen = model.generate(
                     input_ids=gids, attention_mask=gmsk,
-                    max_new_tokens=cfg.latent_len, min_new_tokens=cfg.latent_len,
+                    max_new_tokens=cfg.max_latent_len,
                     do_sample=True, temperature=1.0,
-                    pad_token_id=pad, use_cache=True)
+                    pad_token_id=pad, eos_token_id=tokenizer.eos_token_id, 
+                    use_cache=True)
                     
             z_list = []
             for i in range(B):
-                z = gen[i, mp_len:mp_len+cfg.latent_len].cpu().tolist()
-                if len(z) < cfg.latent_len:
-                    z += [pad] * (cfg.latent_len - len(z))
-                z_list.append(z[:cfg.latent_len])
+                z = gen[i, mp_len:].cpu().tolist()
+                if tokenizer.eos_token_id in z:
+                    eos_idx = z.index(tokenizer.eos_token_id)
+                    z = z[:eos_idx+1]
+                if len(z) < cfg.max_latent_len:
+                    z += [pad] * (cfg.max_latent_len - len(z))
+                z_list.append(z[:cfg.max_latent_len])
                 
             # Кладем сэмплы в очередь по одному или батчами
             # Чтобы Learner мог брать их маленькими порциями (learner_batch_size)

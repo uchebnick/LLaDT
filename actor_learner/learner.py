@@ -222,19 +222,23 @@ def ce_on_mask(logits, ids, mask):
     valid_logits = torch.cat(valid_logits, dim=0)
     return F.cross_entropy(valid_logits.float(), valid_targets, reduction="mean")
 
-def kl_balanced(q_logits, p_logits):
+def kl_balanced_masked(q_logits, p_logits, mask):
     q_log = F.log_softmax(q_logits.float(), dim=-1)
     p_log = F.log_softmax(p_logits.float(), dim=-1)
     
-    # Спортивный KL, где градиенты текут в обе стороны (симметричный)
-    kl_qp = F.kl_div(p_log, q_log, reduction='none', log_target=True).sum(-1).mean()
-    kl_pq = F.kl_div(q_log, p_log, reduction='none', log_target=True).sum(-1).mean()
-    
+    # Calculate KL token-wise, keep sequence dimension: [B, L_z]
+    kl_qp = F.kl_div(p_log, q_log, reduction='none', log_target=True).sum(-1)
+    kl_pq = F.kl_div(q_log, p_log, reduction='none', log_target=True).sum(-1)
     kl = 0.5 * (kl_qp + kl_pq)
     
-    # Entropy of q: H(q) = -sum(q * log(q))
+    # Scale by detached mask to avoid length collapse
+    mask_detached = mask.detach()
+    kl = (kl * mask_detached).sum() / mask_detached.sum().clamp(min=1.0)
+    
+    # Entropy
     q_prob = q_log.exp()
-    entropy = -(q_prob * q_log).sum(dim=-1).mean()
+    entropy = -(q_prob * q_log).sum(dim=-1)
+    entropy = (entropy * mask_detached).sum() / mask_detached.sum().clamp(min=1.0)
     
     return kl, entropy
 
@@ -288,27 +292,40 @@ def run_learner(rank, data_queue, sync_queue):
         
         # 1. q(z|Q,A) - Учитель (видит Q+A)
         q_out = model(input_ids=t_ids, attention_mask=t_at, output_hidden_states=True)
-        q_z_hid = masked_hidden(q_out.hidden_states[-1], t_zm_log, cfg.latent_len)
+        q_z_hid = masked_hidden(q_out.hidden_states[-1], t_zm_log, cfg.max_latent_len)
         q_z_log = model.get_output_embeddings()(q_z_hid)
         del q_out
         
+        # Calculate Cumulative Probability Mask based on EOS
+        eos_id = tokenizer.eos_token_id
+        q_probs = F.softmax(q_z_log.float(), dim=-1)
+        p_eos = q_probs[:, :, eos_id]
+        p_keep = 1.0 - p_eos
+        cum_keep = torch.cumprod(p_keep, dim=1)
+        
+        z_mask = torch.ones_like(p_keep)
+        z_mask[:, 1:] = cum_keep[:, :-1]
+        
         # 2. p(z|Q) - Ученик (видит только Q)
         p_out = model(input_ids=s_ids, attention_mask=s_at, output_hidden_states=True)
-        p_z_hid = masked_hidden(p_out.hidden_states[-1], s_zm_log, cfg.latent_len)
+        p_z_hid = masked_hidden(p_out.hidden_states[-1], s_zm_log, cfg.max_latent_len)
         p_z_log = model.get_output_embeddings()(p_z_hid)
         del p_out
         
         # 3. KL Divergence (symmetric)
-        kl, entropy = kl_balanced(q_z_log, p_z_log)
+        kl, entropy = kl_balanced_masked(q_z_log, p_z_log, z_mask)
 
         # Выталкивающий штраф для Учителя: заставляем его отличаться от Ученика минимум на target_kl
-        kl_teacher_only, _ = kl_balanced(q_z_log, p_z_log.detach())
+        kl_teacher_only, _ = kl_balanced_masked(q_z_log, p_z_log.detach(), z_mask)
         kl_push_loss = cfg.gamma_kl * torch.relu(cfg.target_kl - kl_teacher_only)
 
         # 4. Предсказание ответа из soft_z
         embed_matrix = model.get_input_embeddings().weight
         q_z_probs = F.gumbel_softmax(q_z_log.float(), tau=tau, hard=True, dim=-1).to(embed_matrix.dtype)
         soft_z_embeds = torch.matmul(q_z_probs, embed_matrix.detach())
+        
+        # Scale embeddings by mask to stop gradients and attention for padded tokens
+        soft_z_embeds = soft_z_embeds * z_mask.unsqueeze(-1)
         
         s_inputs_embeds = build_student_inputs_embeds(
             model, s_ids, s_zm_embed, s_qm, soft_z_embeds, cfg.learner_device
