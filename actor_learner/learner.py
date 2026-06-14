@@ -201,26 +201,25 @@ def masked_hidden(hidden, mask, max_len):
 
 def ce_on_mask(logits, ids, mask):
     B, L, V = logits.shape
-    # logits shape: [B, max_a_tokens, V]
-    # targets shape needs to be gathered from ids using mask
     valid_targets = []
+    valid_logits = []
     for i in range(B):
-        # The mask corresponds to positions in `ids`
-        # We need the target for position t, which is ids[t+1]
         idx = mask[i].nonzero(as_tuple=True)[0]
         # Shifted targets
         target_idx = idx + 1
-        # Filter out out-of-bounds indices
-        target_idx = target_idx[target_idx < ids.shape[1]]
+        valid_mask = target_idx < ids.shape[1]
+        target_idx = target_idx[valid_mask]
         valid_targets.append(ids[i, target_idx])
+        
+        n = len(target_idx)
+        if n > 0:
+            valid_logits.append(logits[i, :n])
     
     valid_targets = torch.cat(valid_targets)
     if len(valid_targets) == 0:
         return torch.tensor(0.0, device=logits.device, requires_grad=True)
-    
-    # Reshape logits to match targets
-    # Note: logits contains ONLY the masked tokens (not the whole sequence)
-    valid_logits = logits.reshape(-1, V)[:len(valid_targets)]
+        
+    valid_logits = torch.cat(valid_logits, dim=0)
     return F.cross_entropy(valid_logits.float(), valid_targets, reduction="mean")
 
 def kl_balanced(q_logits, p_logits):
