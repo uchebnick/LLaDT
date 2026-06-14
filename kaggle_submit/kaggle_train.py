@@ -311,7 +311,7 @@ class Logger:
         print(f"{'─'*68}")
         print(f"  z  : {z_text[:260]}")
         print(f"{'─'*68}")
-        print(f"  unique={uniq}/{cfg.latent_len}   "
+        print(f"  unique={uniq}/{cfg.max_latent_len}   "
               f"readability={readability:.1%}   "
               f"(↓ хорошо — токены становятся латентными)")
         top_str = "  ".join(f"'{tokenizer.decode([t])}'×{c}" for t, c in top)
