@@ -387,33 +387,44 @@ def build_student_inputs_embeds(model, s_ids, s_zm_embed, s_qm, soft_z, device):
         
     return s_embeds
 
-def masked_logits(logits, mask, Z):
-    B, L, V = logits.shape
+def masked_hidden(hidden, mask, max_len):
+    B, L, D = hidden.shape
     out = []
     for i in range(B):
         idx = mask[i].nonzero(as_tuple=True)[0]
-        n = min(len(idx), Z)
+        n = min(len(idx), max_len)
         if n == 0:
-            chunk = torch.zeros(Z, V, device=logits.device, dtype=logits.dtype)
+            chunk = torch.zeros(max_len, D, device=hidden.device, dtype=hidden.dtype)
         else:
-            chunk = logits[i, idx[:n]]
-            if n < Z:
-                chunk = torch.cat([chunk, torch.zeros(Z-n, V, device=logits.device, dtype=logits.dtype)])
+            chunk = hidden[i, idx[:n]]
+            if n < max_len:
+                chunk = torch.cat([chunk, torch.zeros(max_len-n, D, device=hidden.device, dtype=hidden.dtype)])
         out.append(chunk)
     return torch.stack(out)
 
 def ce_on_mask(logits, ids, mask):
     B, L, V = logits.shape
-    logits_shift = logits[:, :-1]
-    targets = ids[:, 1:]
-    ym = mask[:, 1:]
-    valid_idx = ym.reshape(-1).nonzero(as_tuple=True)[0]
-    if len(valid_idx) == 0:
+    # logits shape: [B, max_a_tokens, V]
+    # targets shape needs to be gathered from ids using mask
+    valid_targets = []
+    for i in range(B):
+        # The mask corresponds to positions in `ids`
+        # We need the target for position t, which is ids[t+1]
+        idx = mask[i].nonzero(as_tuple=True)[0]
+        # Shifted targets
+        target_idx = idx + 1
+        # Filter out out-of-bounds indices
+        target_idx = target_idx[target_idx < ids.shape[1]]
+        valid_targets.append(ids[i, target_idx])
+    
+    valid_targets = torch.cat(valid_targets)
+    if len(valid_targets) == 0:
         return torch.tensor(0.0, device=logits.device, requires_grad=True)
-    valid_logits = logits_shift.reshape(-1, V)[valid_idx]
-    valid_targets = targets.reshape(-1)[valid_idx]
-    mean_ce = F.cross_entropy(valid_logits.float(), valid_targets, reduction="mean")
-    return mean_ce
+    
+    # Reshape logits to match targets
+    # Note: logits contains ONLY the masked tokens (not the whole sequence)
+    valid_logits = logits.reshape(-1, V)[:len(valid_targets)]
+    return F.cross_entropy(valid_logits.float(), valid_targets, reduction="mean")
 
 def kl_balanced(q_logits, p_logits):
     q_log = F.log_softmax(q_logits.float(), dim=-1)
@@ -480,13 +491,15 @@ def run_learner(rank, data_queue, sync_queue):
         (t_ids, t_at, t_zm_log, t_ym),         (s_ids, s_at, s_zm_log, s_zm_embed, s_ym, s_qm) = build_sequences(batch, tokenizer, z_list, cfg.learner_device)
         
         # 1. q(z|Q,A) - Учитель (видит Q+A)
-        q_out = model(input_ids=t_ids, attention_mask=t_at)
-        q_z_log = masked_logits(q_out.logits, t_zm_log, cfg.latent_len)
+        q_out = model(input_ids=t_ids, attention_mask=t_at, output_hidden_states=True)
+        q_z_hid = masked_hidden(q_out.hidden_states[-1], t_zm_log, cfg.latent_len)
+        q_z_log = model.get_output_embeddings()(q_z_hid)
         del q_out
         
         # 2. p(z|Q) - Ученик (видит только Q)
-        p_out = model(input_ids=s_ids, attention_mask=s_at)
-        p_z_log = masked_logits(p_out.logits, s_zm_log, cfg.latent_len)
+        p_out = model(input_ids=s_ids, attention_mask=s_at, output_hidden_states=True)
+        p_z_hid = masked_hidden(p_out.hidden_states[-1], s_zm_log, cfg.latent_len)
+        p_z_log = model.get_output_embeddings()(p_z_hid)
         del p_out
         
         # 3. KL Divergence (symmetric)
@@ -504,8 +517,9 @@ def run_learner(rank, data_queue, sync_queue):
         s_inputs_embeds = build_student_inputs_embeds(
             model, s_ids, s_zm_embed, s_qm, soft_z_embeds, cfg.learner_device
         )
-        a_out = model(inputs_embeds=s_inputs_embeds, attention_mask=s_at)
-        a_logits = a_out.logits
+        a_out = model(inputs_embeds=s_inputs_embeds, attention_mask=s_at, output_hidden_states=True)
+        a_hid = masked_hidden(a_out.hidden_states[-1], s_ym, cfg.max_a_tokens)
+        a_logits = model.get_output_embeddings()(a_hid)
         del a_out
         
         ce = ce_on_mask(a_logits, s_ids, s_ym)
