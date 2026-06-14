@@ -231,14 +231,14 @@ def kl_balanced_masked(q_logits, p_logits, mask):
     kl_pq = F.kl_div(q_log, p_log, reduction='none', log_target=True).sum(-1)
     kl = 0.5 * (kl_qp + kl_pq)
     
-    # Scale by detached mask to avoid length collapse
+    # Sum over sequence length (to penalize long sequences), mean over batch
     mask_detached = mask.detach()
-    kl = (kl * mask_detached).sum() / mask_detached.sum().clamp(min=1.0)
+    kl = (kl * mask_detached).sum(dim=1).mean()
     
     # Entropy
     q_prob = q_log.exp()
     entropy = -(q_prob * q_log).sum(dim=-1)
-    entropy = (entropy * mask_detached).sum() / mask_detached.sum().clamp(min=1.0)
+    entropy = (entropy * mask_detached).sum(dim=1).mean()
     
     return kl, entropy
 
